@@ -2,7 +2,7 @@ import streamlit as st
 import docx
 from docx.table import Table
 from docx.text.paragraph import Paragraph
-import google.generativeai as genai
+import requests
 import json
 import io
 
@@ -27,41 +27,11 @@ def extract_raw_text(file_stream):
                                 
     return "\n".join(raw_text)
 
-# --- 2. 呼叫 AI 進行語意轉換 (全自動適應版) ---
-def parse_with_ai(raw_text, api_key):
-    genai.configure(api_key=api_key)
-    
-    # 動態查詢這把金鑰支援的所有模型
-    available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-    
-    # 自動挑選最好的模型 (優先順序: 1.5-flash-latest > 1.5-flash > 1.5-pro > 1.0-pro)
-    target_model = "gemini-pro" # 最基礎的保底模型
-    use_json_mode = False
-    
-    if 'models/gemini-1.5-flash-latest' in available_models:
-        target_model = "gemini-1.5-flash-latest"
-        use_json_mode = True
-    elif 'models/gemini-1.5-flash' in available_models:
-        target_model = "gemini-1.5-flash"
-        use_json_mode = True
-    elif 'models/gemini-1.5-pro-latest' in available_models:
-        target_model = "gemini-1.5-pro-latest"
-        use_json_mode = True
-    elif 'models/gemini-pro' in available_models:
-        target_model = "gemini-pro"
-        use_json_mode = False
-
-    st.toast(f"🤖 系統自動選擇的模型：{target_model}")
-    
-    # 根據支援度設定參數
-    generation_config = {"temperature": 0.1}
-    if use_json_mode:
-        generation_config["response_mime_type"] = "application/json"
-        
-    model = genai.GenerativeModel(
-        model_name=target_model,
-        generation_config=generation_config
-    )
+# --- 2. 繞過 SDK，直接透過 HTTP 呼叫 Google API ---
+def parse_with_ai_rest(raw_text, api_key):
+    # 直接指定呼叫 gemini-1.5-flash
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    headers = {'Content-Type': 'application/json'}
     
     prompt = f"""
     你是一個專業的題庫資料處理專家。
@@ -95,27 +65,45 @@ def parse_with_ai(raw_text, api_key):
     {raw_text}
     """
     
-    response = model.generate_content(prompt)
+    # 準備傳送給 Google 的資料包
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json"
+        }
+    }
     
-    # 清理 AI 可能手癢加上的 Markdown 標籤
-    clean_text = response.text.strip()
-    if clean_text.startswith("```json"):
-        clean_text = clean_text[7:]
-    elif clean_text.startswith("```"):
-        clean_text = clean_text[3:]
-    if clean_text.endswith("```"):
-        clean_text = clean_text[:-3]
+    # 發送請求
+    response = requests.post(url, headers=headers, json=payload)
+    
+    if response.status_code != 200:
+        raise ValueError(f"API 連線失敗 (錯誤碼 {response.status_code})：{response.text}")
         
+    data = response.json()
+    
     try:
-        json_data = json.loads(clean_text.strip())
-        return json_data
+        # 拆解回傳的資料
+        content_text = data['candidates'][0]['content']['parts'][0]['text']
+        
+        # 清理可能殘留的 Markdown 標籤
+        clean_text = content_text.strip()
+        if clean_text.startswith("```json"):
+            clean_text = clean_text[7:]
+        elif clean_text.startswith("```"):
+            clean_text = clean_text[3:]
+        if clean_text.endswith("```"):
+            clean_text = clean_text[:-3]
+            
+        return json.loads(clean_text.strip())
+        
     except Exception as e:
-        raise ValueError(f"AI 回傳格式錯誤：{e}\n\n回傳內容：{clean_text}")
+        raise ValueError(f"解析 JSON 失敗：{e}\n回傳內容：{data}")
 
 # --- 3. 網頁介面設計 ---
 st.set_page_config(page_title="AI 題庫智慧轉檔", page_icon="🤖", layout="wide")
 
-st.title("🤖 題庫：AI 智慧轉檔工具")
+st.title("🤖 題庫：AI 智慧轉檔工具 (直連 API 版)")
 st.markdown("無需強迫修改 Word 格式！直接上傳檔案，讓 AI 幫您讀懂語意並產出資料庫格式。")
 
 with st.sidebar:
@@ -137,7 +125,8 @@ with col1:
                     try:
                         file_stream = io.BytesIO(uploaded_file.read())
                         raw_text = extract_raw_text(file_stream)
-                        parsed_data = parse_with_ai(raw_text, api_key)
+                        # 改用新的 REST API 函數
+                        parsed_data = parse_with_ai_rest(raw_text, api_key)
                         
                         st.session_state['parsed_data'] = parsed_data
                         st.session_state['file_name'] = uploaded_file.name
