@@ -8,7 +8,6 @@ import io
 
 # --- 1. 暴力抽取純文字引擎 ---
 def extract_raw_text(file_stream):
-    """將 Word 檔內所有文字（含表格）暴力抽出，不保留任何排版結構"""
     doc = docx.Document(file_stream)
     raw_text = []
     
@@ -22,32 +21,52 @@ def extract_raw_text(file_stream):
             for row in table.rows:
                 for cell in row.cells:
                     if cell.text.strip():
-                        # 將表格內的換行也攤平
                         for line in cell.text.split('\n'):
                             if line.strip():
                                 raw_text.append(line.strip())
                                 
     return "\n".join(raw_text)
 
-# --- 2. 呼叫 AI 進行語意轉換 ---
+# --- 2. 呼叫 AI 進行語意轉換 (全自動適應版) ---
 def parse_with_ai(raw_text, api_key):
-    """將純文字交給 Gemini 進行語意分析與 JSON 結構化"""
     genai.configure(api_key=api_key)
     
-    # 確保使用最新支援的 flash 模型
+    # 動態查詢這把金鑰支援的所有模型
+    available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+    
+    # 自動挑選最好的模型 (優先順序: 1.5-flash-latest > 1.5-flash > 1.5-pro > 1.0-pro)
+    target_model = "gemini-pro" # 最基礎的保底模型
+    use_json_mode = False
+    
+    if 'models/gemini-1.5-flash-latest' in available_models:
+        target_model = "gemini-1.5-flash-latest"
+        use_json_mode = True
+    elif 'models/gemini-1.5-flash' in available_models:
+        target_model = "gemini-1.5-flash"
+        use_json_mode = True
+    elif 'models/gemini-1.5-pro-latest' in available_models:
+        target_model = "gemini-1.5-pro-latest"
+        use_json_mode = True
+    elif 'models/gemini-pro' in available_models:
+        target_model = "gemini-pro"
+        use_json_mode = False
+
+    st.toast(f"🤖 系統自動選擇的模型：{target_model}")
+    
+    # 根據支援度設定參數
+    generation_config = {"temperature": 0.1}
+    if use_json_mode:
+        generation_config["response_mime_type"] = "application/json"
+        
     model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        generation_config={
-            "temperature": 0.1, # 降低隨機性，確保格式穩定
-            "response_mime_type": "application/json", # 強制要求模型吐出 JSON 格式
-        }
+        model_name=target_model,
+        generation_config=generation_config
     )
     
     prompt = f"""
     你是一個專業的題庫資料處理專家。
     請將以下的「原始混亂文本」，轉換成結構化的 JSON 陣列 (JSON Array)。
     原始文本包含了題目、選項(A, B, C, D)、答案、解析以及難度等標籤。
-    排版可能極度混亂（例如選項沒對齊、解析前面有奇怪符號等），請透過你的語意理解能力來精準擷取。
 
     必須輸出的 JSON 格式定義如下：
     [
@@ -68,10 +87,8 @@ def parse_with_ai(raw_text, api_key):
         }}
       }}
     ]
-
-    請注意：
-    1. 確保所有題目都被完整擷取，不可遺漏。
-    2. 解析區塊通常緊跟在題目與選項之後，請仔細尋找「解析」字眼。
+    
+    請注意：只輸出 JSON 格式，不要包含任何 ```json 的 Markdown 標籤。
     
     以下是原始文本：
     ---
@@ -80,11 +97,20 @@ def parse_with_ai(raw_text, api_key):
     
     response = model.generate_content(prompt)
     
+    # 清理 AI 可能手癢加上的 Markdown 標籤
+    clean_text = response.text.strip()
+    if clean_text.startswith("```json"):
+        clean_text = clean_text[7:]
+    elif clean_text.startswith("```"):
+        clean_text = clean_text[3:]
+    if clean_text.endswith("```"):
+        clean_text = clean_text[:-3]
+        
     try:
-        json_data = json.loads(response.text)
+        json_data = json.loads(clean_text.strip())
         return json_data
     except Exception as e:
-        raise ValueError(f"AI 回傳的格式非有效 JSON，解析失敗：{e}\n\nAI 回傳內容：{response.text}")
+        raise ValueError(f"AI 回傳格式錯誤：{e}\n\n回傳內容：{clean_text}")
 
 # --- 3. 網頁介面設計 ---
 st.set_page_config(page_title="AI 題庫智慧轉檔", page_icon="🤖", layout="wide")
@@ -92,12 +118,9 @@ st.set_page_config(page_title="AI 題庫智慧轉檔", page_icon="🤖", layout=
 st.title("🤖 題庫：AI 智慧轉檔工具")
 st.markdown("無需強迫修改 Word 格式！直接上傳檔案，讓 AI 幫您讀懂語意並產出資料庫格式。")
 
-# 側邊欄：設定 API Key
 with st.sidebar:
     st.header("⚙️ 系統設定")
-    st.info("請輸入您的 Google Gemini API Key 以啟用 AI 轉換功能。")
     api_key = st.text_input("Gemini API Key", type="password")
-    st.markdown("[👉 點此免費獲取 API Key](https://aistudio.google.com/app/apikey)")
 
 col1, col2 = st.columns([1, 2])
 
@@ -123,7 +146,6 @@ with col1:
                     except Exception as e:
                         st.error(f"❌ 發生錯誤：{e}")
 
-    # 下載按鈕區塊
     if 'parsed_data' in st.session_state:
         json_str = json.dumps(st.session_state['parsed_data'], ensure_ascii=False, indent=4)
         st.download_button(
@@ -138,29 +160,21 @@ with col2:
     st.subheader("🔍 AI 解析結果即時預覽")
     if 'parsed_data' in st.session_state:
         tab_preview, tab_json = st.tabs(["畫面預覽", "JSON 原始碼"])
-        
         parsed_data = st.session_state['parsed_data']
         
         with tab_preview:
-            st.info(f"預覽前 10 題，請檢查 AI 是否正確理解了排版邏輯。")
             preview_limit = min(10, len(parsed_data))
+            st.info(f"預覽前 {preview_limit} 題...")
             
             for i in range(preview_limit):
                 q = parsed_data[i]
                 with st.container(border=True):
                     st.markdown(f"**第 {q.get('question_number', '?')} 題：{q.get('question_text', '')}**")
-                    
-                    options = q.get('options', {})
-                    for opt, text in options.items():
+                    for opt, text in q.get('options', {}).items():
                         st.write(f"({opt}) {text}")
-                    
                     st.success(f"**標準答案：** {q.get('answer', '')}")
-                    
                     if q.get('explanation'):
                         st.info(f"💡 **解析：**\n{q['explanation']}")
-                    else:
-                        st.warning("⚠️ 此題未擷取到解析")
-                        
                     if q.get('tags'):
                         st.write("**📝 標籤數據：**", q['tags'])
                         
