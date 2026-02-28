@@ -27,10 +27,40 @@ def extract_raw_text(file_stream):
                                 
     return "\n".join(raw_text)
 
-# --- 2. 繞過 SDK，直接透過 HTTP 呼叫 Google API ---
+# --- 2. 全自動探測與 API 呼叫引擎 ---
 def parse_with_ai_rest(raw_text, api_key):
-    # 直接指定呼叫 gemini-1.5-flash
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    # 【步驟 A】先向 Google 查詢這把金鑰「真正」能用的模型清單
+    list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    list_resp = requests.get(list_url)
+    
+    if list_resp.status_code != 200:
+        raise ValueError(f"無法驗證 API Key 或取得模型列表：{list_resp.text}")
+        
+    models_data = list_resp.json().get('models', [])
+    # 過濾出支援「生成內容 (generateContent)」的模型
+    available_models = [m['name'] for m in models_data if 'generateContent' in m.get('supportedGenerationMethods', [])]
+    
+    # 【步驟 B】自動挑選最好的模型 (依序向下找，保證一定能中一個)
+    target_model = None
+    preferences = ['models/gemini-1.5-flash-latest', 'models/gemini-1.5-flash', 'models/gemini-1.5-pro-latest', 'models/gemini-pro']
+    
+    for pref in preferences:
+        if pref in available_models:
+            target_model = pref
+            break
+            
+    # 如果真的都沒有上面的首選，就隨便抓一個能用的
+    if not target_model:
+        if available_models:
+            target_model = available_models[0]
+        else:
+            raise ValueError("您的 API Key 尚未開通任何支援文本生成的模型權限，請重新申請一把金鑰。")
+
+    # 在畫面右下角彈出小提示，告訴我們系統選了哪一個
+    st.toast(f"🤖 系統自動為您配對模型：{target_model}")
+    
+    # 【步驟 C】組合最終的 API 網址並發送請求
+    url = f"https://generativelanguage.googleapis.com/v1beta/{target_model}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
     
     prompt = f"""
@@ -65,16 +95,14 @@ def parse_with_ai_rest(raw_text, api_key):
     {raw_text}
     """
     
-    # 準備傳送給 Google 的資料包
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
-            "temperature": 0.1,
-            "responseMimeType": "application/json"
+            "temperature": 0.1, # 降低隨機性
+            # 為了相容較舊的 gemini-pro 模型，這裡不強制鎖死 JSON 模式，改由 prompt 控制
         }
     }
     
-    # 發送請求
     response = requests.post(url, headers=headers, json=payload)
     
     if response.status_code != 200:
@@ -83,7 +111,6 @@ def parse_with_ai_rest(raw_text, api_key):
     data = response.json()
     
     try:
-        # 拆解回傳的資料
         content_text = data['candidates'][0]['content']['parts'][0]['text']
         
         # 清理可能殘留的 Markdown 標籤
@@ -103,7 +130,7 @@ def parse_with_ai_rest(raw_text, api_key):
 # --- 3. 網頁介面設計 ---
 st.set_page_config(page_title="AI 題庫智慧轉檔", page_icon="🤖", layout="wide")
 
-st.title("🤖 題庫：AI 智慧轉檔工具 (直連 API 版)")
+st.title("🤖 題庫：AI 智慧轉檔工具 (全自動探測版)")
 st.markdown("無需強迫修改 Word 格式！直接上傳檔案，讓 AI 幫您讀懂語意並產出資料庫格式。")
 
 with st.sidebar:
@@ -121,11 +148,10 @@ with col1:
             st.warning("⚠️ 請先在左側欄輸入 API Key 才能進行轉換。")
         else:
             if st.button("🚀 啟動 AI 智慧分析"):
-                with st.spinner('AI 正在閱讀並理解題庫中，這可能需要幾十秒...'):
+                with st.spinner('AI 正在尋找最佳模型並理解題庫中...'):
                     try:
                         file_stream = io.BytesIO(uploaded_file.read())
                         raw_text = extract_raw_text(file_stream)
-                        # 改用新的 REST API 函數
                         parsed_data = parse_with_ai_rest(raw_text, api_key)
                         
                         st.session_state['parsed_data'] = parsed_data
