@@ -33,7 +33,7 @@ def extract_raw_text(file_stream):
 def parse_with_ai(raw_text, api_key):
     """將純文字交給 Gemini 進行語意分析與 JSON 結構化"""
     # 設定 API Key
-    genai.configure(api_key=AIzaSyC2bWY8-TJ0TWdk4F8FmHXrwZUpVONE9cE)
+    genai.configure(api_key=api_key)
     
     # 選擇速度快、適合處理大量文字的 Flash 模型
     model = genai.GenerativeModel(
