@@ -1,39 +1,52 @@
 import streamlit as st
 import docx
+from docx.oxml.table import CT_Tbl
+from docx.oxml.text.paragraph import CT_P
+from docx.table import _Cell, Table
+from docx.text.paragraph import Paragraph
 import re
 import json
 import io
 
-# --- 1. 新增：透視表格與段落的讀取工具 ---
-def iter_block_items(doc):
-    """按文件順序讀取 Word 檔內所有段落與表格內的文字"""
-    for element in doc.element.body:
-        if element.tag.endswith('p'):
-            p = docx.text.paragraph.Paragraph(element, doc)
+# --- 1. 終極版：遞迴透視掃描工具 (保證一字不漏且順序正確) ---
+def iter_block_items(parent):
+    """
+    遞迴讀取 Word 文件中所有段落和表格內容，保證順序完全一致。
+    """
+    if isinstance(parent, docx.document.Document):
+        parent_elm = parent.element.body
+    elif isinstance(parent, _Cell):
+        parent_elm = parent._tc
+    else:
+        parent_elm = parent
+
+    for child in parent_elm.iterchildren():
+        if isinstance(child, CT_P):
+            p = Paragraph(child, parent)
             if p.text.strip():
                 yield p.text.strip()
-        elif element.tag.endswith('tbl'):
-            table = docx.table.Table(element, doc)
+        elif isinstance(child, CT_Tbl):
+            table = Table(child, parent)
             for row in table.rows:
                 for cell in row.cells:
-                    for p in cell.paragraphs:
-                        if p.text.strip():
-                            yield p.text.strip()
+                    # 遞迴進入表格的每一個儲存格
+                    for text in iter_block_items(cell):
+                        yield text
 
-# --- 2. 核心解析引擎 ---
+# --- 2. 核心解析引擎 (增強容錯能力) ---
 def parse_exam_docx(file_stream):
     doc = docx.Document(file_stream)
     questions = []
     current_q = None
     
-    # 寬容模式的正規表達式 (擷取題號、題目與選項)
+    # 擷取題號、題目與選項
     q_pattern = re.compile(r'^(?:\(([A-E])\)\s*)?(\d+)[\.、]\s*(.*)')
     opt_pattern = re.compile(r'\(([A-E])\)\s*([^()]+?)(?=\([A-E]\)|$)')
     
-    # 改用 iter_block_items 來讀取，確保不會漏掉表格內的解析！
+    # 使用終極掃描工具讀取整份文件
     for text in iter_block_items(doc):
             
-        # 抓取題目
+        # 1. 抓取題目
         q_match = q_pattern.match(text)
         if q_match:
             if current_q:
@@ -49,20 +62,21 @@ def parse_exam_docx(file_stream):
             }
             continue
             
-        # 抓取選項
+        # 2. 抓取選項 (為了避免誤判，只有在還沒抓到解析時才抓選項)
         opt_matches = opt_pattern.findall(text)
-        if opt_matches and current_q:
+        if opt_matches and current_q and not current_q["explanation"]:
             for opt_letter, opt_text in opt_matches:
                 current_q["options"][opt_letter] = opt_text.strip()
             continue
             
-        # 抓取解析與標籤 (處理表格內的資料)
+        # 3. 抓取解析與標籤
         if current_q:
-            # 支援 "解  析:", "解析：", "【解析】" 等多種排版
-            if re.match(r'^(?:【)?解\s*析(?:】)?\s*[:：]?', text):
-                raw_exp = re.sub(r'^(?:【)?解\s*析(?:】)?\s*[:：]?\s*', '', text)
+            # 【關鍵修復】：使用 re.search 取代 re.match，這樣就算前面有逗號 ",解析:" 也能精準抓到！
+            if re.search(r'解\s*析\s*[:：]', text):
+                # 把 "解析:" 以及它前面的所有雜訊 (包含逗號) 全部清空
+                raw_exp = re.sub(r'^.*?解\s*析\s*[:：]\s*', '', text)
                 
-                # 處理標籤切割 (如難度、再現性)
+                # 切割後面的難度與再現性標籤
                 parts = re.split(r'","|",\s*"|"', raw_exp)
                 current_q["explanation"] = parts[0].strip()
                 
@@ -75,10 +89,12 @@ def parse_exam_docx(file_stream):
                             current_q["tags"][k] = v
                 continue
                 
-            # 處理跨行文字 (選項還沒出來前算題目，解析出來後算解析的延伸)
+            # 4. 處理跨行文字
             if not current_q["options"] and not current_q["explanation"]:
+                # 選項還沒出來前，當作題目的延伸
                 current_q["question_text"] += "\n" + text
-            elif current_q["explanation"] and not re.match(r'^(?:【)?解\s*析(?:】)?\s*[:：]?', text):
+            elif current_q["explanation"]:
+                # 解析已經出來了，後面的文字通通當作解析的延伸
                 current_q["explanation"] += "\n" + text
 
     # 收尾最後一題
@@ -102,17 +118,14 @@ with col1:
     
     if uploaded_file is not None:
         with st.spinner('正在解析檔案中...'):
-            # 讀取上傳的檔案為記憶體串流
             file_stream = io.BytesIO(uploaded_file.read())
             
             try:
                 parsed_data = parse_exam_docx(file_stream)
                 st.success(f"✅ 解析成功！共擷取 {len(parsed_data)} 道題目。")
                 
-                # 將資料轉為 JSON 字串
                 json_str = json.dumps(parsed_data, ensure_ascii=False, indent=4)
                 
-                # 提供下載按鈕
                 st.download_button(
                     label="📥 下載 JSON 題庫檔",
                     data=json_str,
@@ -126,11 +139,9 @@ with col1:
 with col2:
     st.subheader("🔍 解析結果即時預覽")
     if uploaded_file is not None and 'parsed_data' in locals():
-        # 使用 tabs 來切換「視覺化預覽」與「原始 JSON」
         tab_preview, tab_json = st.tabs(["畫面預覽", "JSON 原始碼"])
         
         with tab_preview:
-            # 預覽前 10 題，方便確認解析擷取狀況
             preview_limit = min(10, len(parsed_data))
             st.info(f"僅顯示前 {preview_limit} 題預覽...")
             
