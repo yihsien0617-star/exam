@@ -36,11 +36,11 @@ def parse_with_ai(raw_text, api_key):
     genai.configure(api_key=api_key)
     
     # 選擇速度快、適合處理大量文字的 Flash 模型
-    model = genai.GenerativeModel(
-    model_name="gemini-pro",
+model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash",  # 👈 換回這個最新版的模型
         generation_config={
-            "temperature": 0.1, # 降低隨機性，確保格式穩定
-            "response_mime_type": "application/json", # 強制要求模型吐出 JSON 格式
+            "temperature": 0.1,
+            "response_mime_type": "application/json",
         }
     )
     
