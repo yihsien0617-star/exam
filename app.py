@@ -32,22 +32,21 @@ def extract_raw_text(file_stream):
 # --- 2. 呼叫 AI 進行語意轉換 ---
 def parse_with_ai(raw_text, api_key):
     """將純文字交給 Gemini 進行語意分析與 JSON 結構化"""
-    # 設定 API Key
     genai.configure(api_key=api_key)
     
-    # 選擇速度快、適合處理大量文字的 Flash 模型
-model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",  # 👈 換回這個最新版的模型
+    # 確保使用最新支援的 flash 模型
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash",
         generation_config={
-            "temperature": 0.1,
-            "response_mime_type": "application/json",
+            "temperature": 0.1, # 降低隨機性，確保格式穩定
+            "response_mime_type": "application/json", # 強制要求模型吐出 JSON 格式
         }
     )
     
     prompt = f"""
-    你是一個專業的醫事檢驗師國考題庫資料處理專家。
-    請將以下的「國考題庫原始混亂文本」，轉換成結構化的 JSON 陣列 (JSON Array)。
-    原始文本包含了題目、選項(A, B, C, D)、答案、老師解析以及難度等標籤。
+    你是一個專業的題庫資料處理專家。
+    請將以下的「原始混亂文本」，轉換成結構化的 JSON 陣列 (JSON Array)。
+    原始文本包含了題目、選項(A, B, C, D)、答案、解析以及難度等標籤。
     排版可能極度混亂（例如選項沒對齊、解析前面有奇怪符號等），請透過你的語意理解能力來精準擷取。
 
     必須輸出的 JSON 格式定義如下：
@@ -62,7 +61,7 @@ model = genai.GenerativeModel(
           "C": "選項C內容",
           "D": "選項D內容"
         }},
-        "explanation": "老師解析內容(請完整保留，若無則留空)",
+        "explanation": "解析內容(請完整保留，若無則留空)",
         "tags": {{
           "難度": "簡單/適中/困難 (若文本有提供)",
           "再現性": "高度/中度/低度 (若文本有提供)"
@@ -81,7 +80,6 @@ model = genai.GenerativeModel(
     
     response = model.generate_content(prompt)
     
-    # 將 AI 回傳的字串轉換回 Python 字典格式
     try:
         json_data = json.loads(response.text)
         return json_data
@@ -89,10 +87,10 @@ model = genai.GenerativeModel(
         raise ValueError(f"AI 回傳的格式非有效 JSON，解析失敗：{e}\n\nAI 回傳內容：{response.text}")
 
 # --- 3. 網頁介面設計 ---
-st.set_page_config(page_title="AI 國考題庫智慧轉檔", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="AI 題庫智慧轉檔", page_icon="🤖", layout="wide")
 
-st.title("🤖 醫檢師國考題庫：AI 智慧轉檔工具")
-st.markdown("無需強迫其他老師修改 Word 格式！直接上傳檔案，讓 AI 幫您讀懂語意並產出資料庫格式。")
+st.title("🤖 題庫：AI 智慧轉檔工具")
+st.markdown("無需強迫修改 Word 格式！直接上傳檔案，讓 AI 幫您讀懂語意並產出資料庫格式。")
 
 # 側邊欄：設定 API Key
 with st.sidebar:
@@ -114,11 +112,8 @@ with col1:
             if st.button("🚀 啟動 AI 智慧分析"):
                 with st.spinner('AI 正在閱讀並理解題庫中，這可能需要幾十秒...'):
                     try:
-                        # 步驟 1：暴力抽取純文字
                         file_stream = io.BytesIO(uploaded_file.read())
                         raw_text = extract_raw_text(file_stream)
-                        
-                        # 步驟 2：呼叫 AI 處理
                         parsed_data = parse_with_ai(raw_text, api_key)
                         
                         st.session_state['parsed_data'] = parsed_data
@@ -147,7 +142,7 @@ with col2:
         parsed_data = st.session_state['parsed_data']
         
         with tab_preview:
-            st.info(f"預覽前 10 題，請檢查 AI 是否正確理解了其他老師的排版邏輯。")
+            st.info(f"預覽前 10 題，請檢查 AI 是否正確理解了排版邏輯。")
             preview_limit = min(10, len(parsed_data))
             
             for i in range(preview_limit):
@@ -162,7 +157,7 @@ with col2:
                     st.success(f"**標準答案：** {q.get('answer', '')}")
                     
                     if q.get('explanation'):
-                        st.info(f"💡 **老師解析：**\n{q['explanation']}")
+                        st.info(f"💡 **解析：**\n{q['explanation']}")
                     else:
                         st.warning("⚠️ 此題未擷取到解析")
                         
