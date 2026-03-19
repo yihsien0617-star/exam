@@ -31,39 +31,45 @@ def extract_raw_text(file_stream):
 # --- 2. 標籤與解析淨化工具 ---
 def extract_tags_and_clean(text, current_tags):
     """從解析字串中精準分離出難度、再現性，並去除多餘符號"""
-    # 尋找難度
     diff_match = re.search(r'難\s*度[:：]\s*([^\(,"”]+)', text)
     if diff_match:
         current_tags["難度"] = diff_match.group(1).strip()
         
-    # 尋找再現性
     rep_match = re.search(r'再\s*現\s*性[:：]\s*([^\(,"”]+)', text)
     if rep_match:
         current_tags["再現性"] = rep_match.group(1).strip()
         
-    # 將解析內文中的標籤與後面的選項說明 (極低, 低度...) 徹底刪除
     clean_exp = re.sub(r'[,"]*\s*難\s*度[:：][^"]+"?', '', text)
     clean_exp = re.sub(r'[,"]*\s*再\s*現\s*性[:：][^"]+"?', '', clean_exp)
     clean_exp = re.sub(r'\([^\)]*極低[^\)]*\)', '', clean_exp)
     clean_exp = re.sub(r'\([^\)]*非常簡單[^\)]*\)', '', clean_exp)
     
-    # 清除前後殘留的引號與逗號
     return clean_exp.strip('", '), current_tags
 
-# --- 3. 核心精準解析引擎 ---
+# --- 3. 核心精準解析引擎 (新增年份自動記憶) ---
 def parse_unified_format(lines):
     questions = []
     current_q = None
+    current_year = "未分類" # 預設年份，用來接住最一開始還沒遇到標題的題目
     
-    # 擷取題號、答案與題目 (例如: (D) 1. 題目...)
+    # 擷取年份標題 (例如: 107年第一次醫檢師...)
+    year_pattern = re.compile(r'(\d{3})\s*年\s*(第[一二]次)')
+    # 擷取題號、答案與題目
     q_pattern = re.compile(r'^\s*\(([A-E])\)\s*(\d+)[\.、]\s*(.*)')
-    # 擷取選項 (例如: (A) 選項內容)
+    # 擷取選項
     opt_pattern = re.compile(r'\(([A-E])\)\s*([^()]+?)(?=\([A-E]\)|$)')
     
     for line in lines:
         clean_line = line.strip()
         
-        # [步驟 A] 判斷是否為新題目
+        # [步驟 A] 偵測是否為年份標題列
+        year_match = year_pattern.search(clean_line)
+        if year_match and "醫檢師" in clean_line: # 加上醫檢師字眼作為雙重確認，避免誤判
+            # 更新目前記憶的年份 (例如：107年第一次)
+            current_year = f"{year_match.group(1)}年{year_match.group(2)}"
+            continue
+            
+        # [步驟 B] 判斷是否為新題目
         q_match = q_pattern.match(clean_line)
         if q_match:
             if current_q:
@@ -77,42 +83,36 @@ def parse_unified_format(lines):
                 "answer": ans,
                 "options": {},
                 "explanation": "",
-                "tags": {}
+                "tags": {
+                    "年份": current_year # 自動把記憶中的年份貼給這題
+                }
             }
             continue
             
         if not current_q:
             continue
             
-        # [步驟 B] 判斷是否為選項
+        # [步驟 C] 判斷是否為選項
         opt_matches = opt_pattern.findall(clean_line)
         if opt_matches and not current_q["explanation"]:
             for opt_letter, opt_text in opt_matches:
                 current_q["options"][opt_letter] = opt_text.strip()
             continue
             
-        # [步驟 C] 判斷是否進入解析區塊
+        # [步驟 D] 判斷是否進入解析區塊
         if "解  析:" in clean_line or "解析:" in clean_line or "解析：" in clean_line:
-            # 移除開頭的「解析:」字眼
             exp_text = re.sub(r'^.*?(?:解\s*析)[:：]\s*', '', clean_line)
-            
-            # 呼叫淨化工具，把標籤抽出來，留下乾淨的解析
             clean_exp, updated_tags = extract_tags_and_clean(exp_text, current_q["tags"])
             current_q["tags"] = updated_tags
             current_q["explanation"] += clean_exp + "\n"
             continue
             
-        # [步驟 D] 處理跨行文字
+        # [步驟 E] 處理跨行文字
         if not current_q["options"] and not current_q["explanation"]:
-            # 選項還沒出現，歸類為題幹的延伸
             current_q["question_text"] += "\n" + clean_line
         elif current_q["explanation"]:
-            # 解析已經出現，歸類為解析的延伸
-            # 預防標籤掉到下一行的情況
             clean_exp, updated_tags = extract_tags_and_clean(clean_line, current_q["tags"])
             current_q["tags"] = updated_tags
-            
-            # 如果這行只有標籤，淨化後會變成空字串，就不加入解析中
             if clean_exp:
                 current_q["explanation"] += clean_exp + "\n"
 
@@ -126,8 +126,8 @@ def parse_unified_format(lines):
 # --- 4. 網頁介面設計 ---
 st.set_page_config(page_title="國考題庫極速轉檔", page_icon="⚡", layout="wide")
 
-st.title("⚡ 國考題庫：極速精準轉檔工具 (統一格式專用)")
-st.markdown("此版本專為統一格式之題庫設計，**免連網、免 API Key，100% 本地極速處理**。")
+st.title("⚡ 國考題庫：極速精準轉檔工具 (統一格式 + 年份自動偵測版)")
+st.markdown("上傳 Word 檔案後，系統將自動偵測各章節的年份標題，並標記於題目中。")
 
 col1, col2 = st.columns([1, 2])
 
@@ -158,7 +158,7 @@ with col1:
         st.download_button(
             label="📥 下載完整 JSON 題庫檔",
             data=json_str,
-            file_name=st.session_state['file_name'].replace(".docx", ".json"),
+            file_name=st.session_state['file_name'].replace(".docx", "_含年份.json"),
             mime="application/json",
             use_container_width=True
         )
