@@ -5,9 +5,10 @@ from docx.text.paragraph import Paragraph
 import re
 import json
 import io
-import base64  # 新增：用於處理圖片編碼
+import base64
+from PIL import Image  # 新增：用於圖片壓縮處理
 
-# --- 1. 抽取純文字與圖片引擎 (升級版) ---
+# --- 1. 抽取純文字與圖片引擎 (圖片壓縮升級版) ---
 def extract_raw_text(file_stream):
     doc = docx.Document(file_stream)
     lines = []
@@ -22,11 +23,28 @@ def extract_raw_text(file_stream):
                 if embed:
                     try:
                         image_part = run.part.rels[embed].target_part
-                        # 將圖片轉為 Base64 字串
-                        b64_str = base64.b64encode(image_part.blob).decode('utf-8')
-                        ext = image_part.content_type.split('/')[-1]
-                        # 插入特殊標記，讓後續程式認得這是圖片
-                        para_text += f"\n[IMAGE_BASE64:data:image/{ext};base64,{b64_str}]\n"
+                        image_data = image_part.blob
+                        
+                        # --- 圖片壓縮處理區塊 ---
+                        img = Image.open(io.BytesIO(image_data))
+                        
+                        # 若為帶透明度的 PNG 或其他格式，統一轉為 RGB 以便存為 JPEG
+                        if img.mode in ("RGBA", "P"):
+                            img = img.convert("RGB")
+                        
+                        # 限制最大寬高為 800px (等比例縮小，國考圖表此尺寸通常已足夠清晰)
+                        img.thumbnail((800, 800), Image.Resampling.LANCZOS)
+                        
+                        # 將壓縮後的圖片存入暫存區 (使用 JPEG 格式，品質設為 75)
+                        buffer = io.BytesIO()
+                        img.save(buffer, format="JPEG", quality=75)
+                        compressed_blob = buffer.getvalue()
+                        
+                        # 將壓縮後的圖片轉為 Base64 字串
+                        b64_str = base64.b64encode(compressed_blob).decode('utf-8')
+                        
+                        # 插入特殊標記，統一標示為 jpeg
+                        para_text += f"\n[IMAGE_BASE64:data:image/jpeg;base64,{b64_str}]\n"
                     except Exception as e:
                         pass
         
@@ -93,10 +111,9 @@ def parse_unified_format(lines):
     questions = []
     current_q = None
     current_year = "未分類" 
-    last_opt = None  # 新增：記錄最後一個處理的選項，用來接續多行選項與圖片
+    last_opt = None
     
     year_pattern = re.compile(r'(\d{3})\s*年\s*(第[一二]次)')
-    # 修改1：放寬選項的匹配，支援選項文字內含半形括號，並支援空選項(如純圖片)
     opt_pattern = re.compile(r'\(([A-E])\)\s*(.*?)(?=\s*\([A-E]\)|$)')
     
     for line in lines:
@@ -107,7 +124,6 @@ def parse_unified_format(lines):
             current_year = f"{year_match.group(1)}年{year_match.group(2)}"
             continue
             
-        # 修改2：支援括號內為多選/文字 (如 "(A,D)", "(皆對)")
         q_match_full = re.match(r'^\s*\(([^)]+)\)\s*(\d+)[\.、]\s*(.*)', clean_line)
         is_new_q = False
         ans, num, q_text = None, None, ""
@@ -117,11 +133,9 @@ def parse_unified_format(lines):
             num = int(num_str)
             is_new_q = True
         else:
-            # 修改3：處理完全沒有解答括號的題號 (例如 "30. Rous sarcoma virus...")
             q_match_missing_ans = re.match(r'^\s*(\d+)[\.、]\s*(.*)', clean_line)
             if q_match_missing_ans:
                 temp_num = int(q_match_missing_ans.group(1))
-                # 嚴格確認是新題號：目前無題目、新年份的第1題，或題號連續遞增 (避免誤抓解析中的編號)
                 if not current_q or temp_num == 1 or (current_q and temp_num == current_q["question_number"] + 1):
                     num = temp_num
                     q_text = q_match_missing_ans.group(2)
@@ -129,10 +143,8 @@ def parse_unified_format(lines):
                     is_new_q = True
 
         if is_new_q:
-            # 修改4：處理選項與題目擠在同一行的情況
             opt_matches = opt_pattern.findall(q_text)
             if opt_matches:
-                # 若題幹內含選項，將選項前的文字切出作為真正的題目
                 q_text = re.split(r'\s*\([A-E]\)', q_text, 1)[0].strip()
                 
             if current_q:
@@ -150,7 +162,6 @@ def parse_unified_format(lines):
             }
             last_opt = None
             
-            # 若題目行內含選項，直接寫入字典
             if opt_matches:
                 for opt_letter, opt_text in opt_matches:
                     current_q["options"][opt_letter] = opt_text.strip()
@@ -161,7 +172,6 @@ def parse_unified_format(lines):
             
         opt_matches = opt_pattern.findall(clean_line)
         if opt_matches and not current_q["explanation"]:
-            # 檢查是否有漏掉的題幹文字 (出現在該行第一個選項前)
             prefix_text = re.split(r'\s*\([A-E]\)', clean_line, 1)[0].strip()
             if prefix_text:
                 current_q["question_text"] += "\n" + prefix_text
@@ -178,11 +188,9 @@ def parse_unified_format(lines):
             current_q["explanation"] += clean_exp + "\n"
             continue
             
-        # 歸類找不到特徵的獨立行 (文字或圖片 Base64)
         if not current_q["options"] and not current_q["explanation"]:
             current_q["question_text"] += "\n" + clean_line
         elif current_q["options"] and not current_q["explanation"]:
-            # 修改5：若在選項區域內出現沒有 (A)~(E) 開頭的行(例如圖片)，直接附加到上一個處理的選項中
             if last_opt and clean_line:
                 current_q["options"][last_opt] += "\n" + clean_line
         elif current_q["explanation"]:
@@ -200,29 +208,30 @@ def parse_unified_format(lines):
 
 # --- 5. 網頁介面設計 ---
 st.set_page_config(page_title="國考題庫極速轉檔", page_icon="⚡", layout="wide")
-st.title("⚡ 國考題庫：極速轉檔工具 (支援圖片抽取版)")
+st.title("⚡ 國考題庫：極速轉檔工具 (支援圖片壓縮版)")
 
 col1, col2 = st.columns([1, 2])
 with col1:
     uploaded_file = st.file_uploader("上傳含有圖片的 Word 檔案 (.docx)", type=['docx'])
     if uploaded_file is not None:
-        with st.spinner('正在抽取圖文與解析中...'):
+        with st.spinner('正在抽取圖文與壓縮圖片中，請稍候...'):
             try:
                 file_stream = io.BytesIO(uploaded_file.read())
                 lines = extract_raw_text(file_stream)
                 parsed_data = parse_unified_format(lines)
                 st.session_state['parsed_data'] = parsed_data
                 st.session_state['file_name'] = uploaded_file.name
-                st.success("✅ 解析完成！圖片已自動封裝。")
+                st.success("✅ 解析完成！圖片已自動壓縮並封裝。")
             except Exception as e:
                 st.error(f"❌ 發生錯誤：{e}")
 
     if 'parsed_data' in st.session_state:
-        json_str = json.dumps(st.session_state['parsed_data'], ensure_ascii=False, indent=4)
+        # 優化點：將 JSON 字串轉為 Bytes 傳遞，減輕 Streamlit 下載按鈕的記憶體負擔
+        json_bytes = json.dumps(st.session_state['parsed_data'], ensure_ascii=False, indent=4).encode('utf-8')
         st.download_button(
-            label="📥 下載含圖片之 JSON 題庫檔",
-            data=json_str,
-            file_name=st.session_state['file_name'].replace(".docx", "_含圖.json"),
+            label="📥 下載含壓縮圖片之 JSON 題庫檔",
+            data=json_bytes,
+            file_name=st.session_state['file_name'].replace(".docx", "_輕量版.json"),
             mime="application/json",
             use_container_width=True
         )
@@ -230,5 +239,5 @@ with col1:
 with col2:
     st.subheader("🔍 解析結果預覽 (純文字檢視)")
     if 'parsed_data' in st.session_state:
-        st.info("此處為原始碼檢視，長串英數亂碼即為圖片的 Base64 封裝。")
-        st.json(st.session_state['parsed_data'][:2]) # 圖片字串很長，只預覽前2題
+        st.info("已啟用自動化圖片壓縮 (最大寬度 800px, JPEG 格式)。")
+        st.json(st.session_state['parsed_data'][:2])
