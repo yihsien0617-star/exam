@@ -88,15 +88,16 @@ def auto_classify_topic(q_dict):
             max_hits, best_topic = hits, topic
     return best_topic
 
-# --- 4. 核心解析引擎 ---
+# --- 4. 核心解析引擎 (智慧排錯升級版) ---
 def parse_unified_format(lines):
     questions = []
     current_q = None
     current_year = "未分類" 
+    last_opt = None  # 新增：記錄最後一個處理的選項，用來接續多行選項與圖片
     
     year_pattern = re.compile(r'(\d{3})\s*年\s*(第[一二]次)')
-    q_pattern = re.compile(r'^\s*\(([A-E])\)\s*(\d+)[\.、]\s*(.*)')
-    opt_pattern = re.compile(r'\(([A-E])\)\s*([^()]+?)(?=\([A-E]\)|$)')
+    # 修改1：放寬選項的匹配，支援選項文字內含半形括號，並支援空選項(如純圖片)
+    opt_pattern = re.compile(r'\(([A-E])\)\s*(.*?)(?=\s*\([A-E]\)|$)')
     
     for line in lines:
         clean_line = line.strip()
@@ -106,30 +107,68 @@ def parse_unified_format(lines):
             current_year = f"{year_match.group(1)}年{year_match.group(2)}"
             continue
             
-        q_match = q_pattern.match(clean_line)
-        if q_match:
+        # 修改2：支援括號內為多選/文字 (如 "(A,D)", "(皆對)")
+        q_match_full = re.match(r'^\s*\(([^)]+)\)\s*(\d+)[\.、]\s*(.*)', clean_line)
+        is_new_q = False
+        ans, num, q_text = None, None, ""
+
+        if q_match_full:
+            ans, num_str, q_text = q_match_full.groups()
+            num = int(num_str)
+            is_new_q = True
+        else:
+            # 修改3：處理完全沒有解答括號的題號 (例如 "30. Rous sarcoma virus...")
+            q_match_missing_ans = re.match(r'^\s*(\d+)[\.、]\s*(.*)', clean_line)
+            if q_match_missing_ans:
+                temp_num = int(q_match_missing_ans.group(1))
+                # 嚴格確認是新題號：目前無題目、新年份的第1題，或題號連續遞增 (避免誤抓解析中的編號)
+                if not current_q or temp_num == 1 or (current_q and temp_num == current_q["question_number"] + 1):
+                    num = temp_num
+                    q_text = q_match_missing_ans.group(2)
+                    ans = ""
+                    is_new_q = True
+
+        if is_new_q:
+            # 修改4：處理選項與題目擠在同一行的情況
+            opt_matches = opt_pattern.findall(q_text)
+            if opt_matches:
+                # 若題幹內含選項，將選項前的文字切出作為真正的題目
+                q_text = re.split(r'\s*\([A-E]\)', q_text, 1)[0].strip()
+                
             if current_q:
                 current_q["explanation"] = current_q["explanation"].strip()
                 current_q["tags"]["主題"] = auto_classify_topic(current_q)
                 questions.append(current_q)
             
-            ans, num, q_text = q_match.groups()
             current_q = {
-                "question_number": int(num),
-                "question_text": q_text.strip(),
-                "answer": ans,
+                "question_number": num,
+                "question_text": q_text,
+                "answer": ans.strip() if ans else "未提供",
                 "options": {},
                 "explanation": "",
                 "tags": {"年份": current_year}
             }
+            last_opt = None
+            
+            # 若題目行內含選項，直接寫入字典
+            if opt_matches:
+                for opt_letter, opt_text in opt_matches:
+                    current_q["options"][opt_letter] = opt_text.strip()
+                    last_opt = opt_letter
             continue
             
         if not current_q: continue
             
         opt_matches = opt_pattern.findall(clean_line)
         if opt_matches and not current_q["explanation"]:
+            # 檢查是否有漏掉的題幹文字 (出現在該行第一個選項前)
+            prefix_text = re.split(r'\s*\([A-E]\)', clean_line, 1)[0].strip()
+            if prefix_text:
+                current_q["question_text"] += "\n" + prefix_text
+
             for opt_letter, opt_text in opt_matches:
                 current_q["options"][opt_letter] = opt_text.strip()
+                last_opt = opt_letter
             continue
             
         if "解  析:" in clean_line or "解析:" in clean_line or "解析：" in clean_line:
@@ -139,8 +178,13 @@ def parse_unified_format(lines):
             current_q["explanation"] += clean_exp + "\n"
             continue
             
+        # 歸類找不到特徵的獨立行 (文字或圖片 Base64)
         if not current_q["options"] and not current_q["explanation"]:
             current_q["question_text"] += "\n" + clean_line
+        elif current_q["options"] and not current_q["explanation"]:
+            # 修改5：若在選項區域內出現沒有 (A)~(E) 開頭的行(例如圖片)，直接附加到上一個處理的選項中
+            if last_opt and clean_line:
+                current_q["options"][last_opt] += "\n" + clean_line
         elif current_q["explanation"]:
             clean_exp, updated_tags = extract_tags_and_clean(clean_line, current_q["tags"])
             current_q["tags"] = updated_tags
