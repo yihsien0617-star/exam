@@ -1,238 +1,178 @@
-import streamlit as st
 import docx
-from docx.table import Table
-from docx.text.paragraph import Paragraph
-import re
 import json
-import io
-import base64
-from PIL import Image
+import re
+import os
 
-# --- 1. 抽取純文字與圖片引擎 (圖片壓縮升級版) ---
-def extract_raw_text(file_stream):
-    doc = docx.Document(file_stream)
-    lines = []
+def normalize_text(text):
+    """將文字標準化，解決排版不一的問題"""
+    # 1. 轉半形括號
+    text = text.replace('（', '(').replace('）', ')')
+    # 2. 轉半形冒號
+    text = text.replace('：', ':')
+    # 3. 將多個空格(含全形空格)替換為單一半形空格
+    text = re.sub(r'[\s\u3000]+', ' ', text)
+    return text.strip()
+
+def convert_docx_to_json_super_loose(docx_path, json_path):
+    print(f"🔄 開始讀取檔案：{docx_path} ...")
     
-    def process_paragraph(para):
-        para_text = ""
-        for run in para.runs:
-            para_text += run.text
-            for blip in run._element.xpath('.//*[local-name()="blip"]'):
-                embed = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
-                if embed:
-                    try:
-                        image_part = run.part.rels[embed].target_part
-                        image_data = image_part.blob
-                        img = Image.open(io.BytesIO(image_data))
-                        if img.mode in ("RGBA", "P"):
-                            img = img.convert("RGB")
-                        img.thumbnail((800, 800), Image.Resampling.LANCZOS)
-                        buffer = io.BytesIO()
-                        img.save(buffer, format="JPEG", quality=75)
-                        compressed_blob = buffer.getvalue()
-                        b64_str = base64.b64encode(compressed_blob).decode('utf-8')
-                        para_text += f"\n[IMAGE_BASE64:data:image/jpeg;base64,{b64_str}]\n"
-                    except Exception as e:
-                        pass
-        
-        if para_text.strip():
-            for line in para_text.split('\n'):
-                if line.strip():
-                    lines.append(line.strip())
+    try:
+        doc = docx.Document(docx_path)
+    except Exception as e:
+        print(f"❌ 讀取 Word 檔案失敗: {e}")
+        return
 
-    for element in doc.element.body:
-        if element.tag.endswith('p'):
-            para = Paragraph(element, doc)
-            process_paragraph(para)
-        elif element.tag.endswith('tbl'):
-            table = Table(element, doc)
-            for row in table.rows:
-                for cell in row.cells:
-                    for para in cell.paragraphs:
-                        process_paragraph(para)
-    return lines
-
-# --- 2. 標籤與解析淨化工具 ---
-def extract_tags_and_clean(text, current_tags):
-    diff_match = re.search(r'難\s*度[:：]\s*([^\(,"”]+)', text)
-    if diff_match: current_tags["難度"] = diff_match.group(1).strip()
-    rep_match = re.search(r'再\s*現\s*性[:：]\s*([^\(,"”]+)', text)
-    if rep_match: current_tags["再現性"] = rep_match.group(1).strip()
-        
-    clean_exp = re.sub(r'[,"]*\s*難\s*度[:：][^"]+"?', '', text)
-    clean_exp = re.sub(r'[,"]*\s*再\s*現\s*性[:：][^"]+"?', '', clean_exp)
-    clean_exp = re.sub(r'\([^\)]*極低[^\)]*\)', '', clean_exp)
-    clean_exp = re.sub(r'\([^\)]*非常簡單[^\)]*\)', '', clean_exp)
-    return clean_exp.strip('", '), current_tags
-
-# --- 3. 自動主題分類引擎 (排除圖片干擾版) ---
-def auto_classify_topic(q_dict):
-    text = q_dict["question_text"] + " " + q_dict.get("explanation", "")
-    for opt in q_dict["options"].values(): text += " " + opt
-    
-    # 修正重點 1：先移除 Base64 圖片亂碼，避免干擾關鍵字比對
-    text = re.sub(r'\[IMAGE_BASE64:[^\]]+\]', '', text)
-    text = text.upper()
-    
-    topics = {
-        "先天免疫與發炎反應": ["發炎", "白血球", "吞噬", "巨噬細胞", "MACROPHAGE", "NEUTROPHIL", "NK細胞", "自然殺手", "TLR", "先天免疫", "發燒", "C-REACTIVE", "CRP"],
-        "補體系統": ["補體", "COMPLEMENT", "C3", "C4", "C5", "MAC", "古典途徑", "替代途徑", "凝集素途徑", "C1Q"],
-        "抗體與免疫球蛋白": ["抗體", "免疫球蛋白", "IGG", "IGA", "IGM", "IGE", "IGD", "ISOTYPE", "輕鏈", "重鏈", "FAB", "FC", "ALLOTYPE", "IDIOTYPE"],
-        "T細胞與細胞免疫": ["T細胞", "T CELL", "CD4", "CD8", "TH1", "TH2", "TREG", "胸腺", "細胞激素", "CYTOKINE", "IL-", "干擾素", "IFN", "穿孔素", "FAS"],
-        "B細胞與體液免疫": ["B細胞", "B CELL", "漿細胞", "PLASMA CELL", "記憶B", "BCR"],
-        "MHC與移植免疫": ["MHC", "HLA", "移植", "排斥", "組織相容", "GRAFT", "GVHD"],
-        "過敏反應": ["過敏", "HYPERSENSITIVITY", "氣喘", "肥大細胞", "MAST CELL", "組織胺", "第一型", "第二型", "第三型", "第四型", "ARTHUS", "接觸性皮膚炎"],
-        "自體免疫疾病": ["自體免疫", "AUTOIMMUNE", "ANA", "SLE", "紅斑性狼瘡", "類風濕", "RF", "重症肌無力", "橋本氏", "HASHIMOTO", "GRAVES", "SCLERODERMA", "硬皮症", "乾燥症"],
-        "腫瘤免疫": ["腫瘤", "癌症", "TUMOR", "CANCER", "癌", "CEA", "AFP", "PSA", "腫瘤標記", "免疫檢查點", "PD-1", "CTLA-4", "CAR-T", "SIPULEUCEL"],
-        "疫苗與預防接種": ["疫苗", "VACCINE", "佐劑", "ADJUVANT", "被動免疫", "主動免疫", "減毒", "類毒素", "TOXOID"],
-        "免疫檢驗技術": ["ELISA", "流式細胞", "FLOW CYTOMETRY", "螢光", "沉澱", "凝集", "西方墨點", "WESTERN BLOT", "免疫分析", "RIA", "VDRL", "RPR", "免疫電泳"]
-    }
-    
-    best_topic = "其他綜合"
-    max_hits = 0
-    for topic, keywords in topics.items():
-        hits = sum(1 for kw in keywords if kw in text)
-        if hits > max_hits:
-            max_hits, best_topic = hits, topic
-    return best_topic
-
-# --- 4. 核心解析引擎 (智慧排錯升級版) ---
-def parse_unified_format(lines):
     questions = []
+    current_year = "未知年份"
     current_q = None
-    current_year = "未分類" 
-    last_opt = None
     
-    # 修正重點 2：放寬年份抓取，不再強求必須有「醫檢師」三個字
-    year_pattern = re.compile(r'(\d{2,4})\s*年.*?第?\s*[一二12]\s*次?')
-    opt_pattern = re.compile(r'\(([A-E])\)\s*(.*?)(?=\s*\([A-E]\)|$)')
+    # 🌟 1. 標題模糊匹配：只要有「數字+年+第+x+次」字眼就抓
+    year_pattern = re.compile(r'(\d{3})\s*年\s*第\s*([一二])\s*次')
     
-    for line in lines:
-        clean_line = line.strip()
-        if not clean_line: continue
+    # 🌟 2. 題號與答案【超級寬鬆匹配】：
+    # 容許前方有任何 [source] 或 (Ans) 標記
+    # 精準抓取類似 (A)30. 或 (Ans)30、 或 (A) 30. 的格式
+    q_start_pattern = re.compile(r'^\s*.*?\(\s*(?P<ans>[A-Za-z,皆對送分]+)\s*\)\s*(?P<num>\d+)\s*[\.、\s]\s*(?P<text>.*)')
+    
+    # 🌟 3. 解析模糊匹配：容許「解 析 :」、「解 析:」、「解 析」開頭
+    exp_pattern = re.compile(r'^解\s*析\s*[:\s](.*)', re.IGNORECASE)
+
+    # 用來記錄跳過的行，方便除錯
+    skipped_lines = []
+
+    for para in doc.paragraphs:
+        # 1. 先做文字標準化
+        text = normalize_text(para.text)
         
-        year_match = year_pattern.search(clean_line)
-        if year_match and ("次" in clean_line or "醫檢" in clean_line or "解析" in clean_line or "試題" in clean_line):
-            # 濾除多餘空白，確保年份格式一致 (如: 106年第二次)
-            current_year = year_match.group(0).replace(" ", "")
+        if not text:
             continue
             
-        q_match_full = re.match(r'^\s*\(([^)]+)\)\s*(\d+)[\.、]\s*(.*)', clean_line)
-        is_new_q = False
-        ans, num, q_text = None, None, ""
-
-        if q_match_full:
-            ans, num_str, q_text = q_match_full.groups()
-            num = int(num_str)
-            is_new_q = True
-        else:
-            q_match_missing_ans = re.match(r'^\s*(\d+)[\.、]\s*(.*)', clean_line)
-            if q_match_missing_ans:
-                temp_num = int(q_match_missing_ans.group(1))
-                if not current_q or temp_num == 1 or (current_q and temp_num == current_q["question_number"] + 1):
-                    num = temp_num
-                    q_text = q_match_missing_ans.group(2)
-                    ans = ""
-                    is_new_q = True
-
-        if is_new_q:
-            opt_matches = opt_pattern.findall(q_text)
-            if opt_matches:
-                q_text = re.split(r'\s*\([A-E]\)', q_text, 1)[0].strip()
-                
+        # --- 階段 A：判斷是否為年份標題 (模糊匹配) ---
+        year_match = year_pattern.search(text)
+        # 排除包含 (A) 的行，避免把題目當標題
+        if year_match and "(A)" not in text and "()" not in text: 
+            # 重新格式化年份，保持一致性，例如 "108年第1次"
+            current_year = f"{year_match.group(1)}年第{year_match.group(2)}次"
+            # 嘗試保留標題後方的完整文字，如 "免疫學及病毒學"
+            title_suffix = text.split('次')[-1].strip()
+            if title_suffix:
+                current_year += " " + title_suffix
+            print(f"📂 偵測到年份標題：{current_year}")
+            continue
+            
+        # --- 階段 B：判斷是否為新題目 (超級寬鬆) ---
+        q_match = q_start_pattern.match(text)
+        if q_match:
+            # 提交上一題
             if current_q:
-                current_q["explanation"] = current_q["explanation"].strip()
-                current_q["tags"]["主題"] = auto_classify_topic(current_q)
+                _extract_options_v2(current_q)
                 questions.append(current_q)
             
-            # 初始化時就會帶入正確抓取到的 current_year
-            current_q = {
-                "question_number": num,
-                "question_text": q_text,
-                "answer": ans.strip() if ans else "未提供",
-                "options": {},
-                "explanation": "",
-                "tags": {"年份": current_year}
-            }
-            last_opt = None
+            ans = q_match.group('ans').strip().upper()
+            # 防呆：如果答案寫成了全形
+            ans = ans.replace('，', ',')
             
-            if opt_matches:
-                for opt_letter, opt_text in opt_matches:
-                    current_q["options"][opt_letter] = opt_text.strip()
-                    last_opt = opt_letter
-            continue
-            
-        if not current_q: continue
-            
-        opt_matches = opt_pattern.findall(clean_line)
-        if opt_matches and not current_q["explanation"]:
-            prefix_text = re.split(r'\s*\([A-E]\)', clean_line, 1)[0].strip()
-            if prefix_text:
-                current_q["question_text"] += "\n" + prefix_text
-
-            for opt_letter, opt_text in opt_matches:
-                current_q["options"][opt_letter] = opt_text.strip()
-                last_opt = opt_letter
-            continue
-            
-        # 修正重點 3：放寬解析開頭的辨識，容許空白
-        if re.search(r'解\s*析\s*[:：]', clean_line):
-            exp_text = re.sub(r'^.*?(?:解\s*析)\s*[:：]\s*', '', clean_line)
-            clean_exp, updated_tags = extract_tags_and_clean(exp_text, current_q["tags"])
-            current_q["tags"] = updated_tags
-            current_q["explanation"] += clean_exp + "\n"
-            continue
-            
-        if not current_q["options"] and not current_q["explanation"]:
-            current_q["question_text"] += "\n" + clean_line
-        elif current_q["options"] and not current_q["explanation"]:
-            if last_opt and clean_line:
-                current_q["options"][last_opt] += "\n" + clean_line
-        elif current_q["explanation"]:
-            clean_exp, updated_tags = extract_tags_and_clean(clean_line, current_q["tags"])
-            current_q["tags"] = updated_tags
-            if clean_exp:
-                current_q["explanation"] += clean_exp + "\n"
-
-    # 確保最後一題也有順利加上主題分類
-    if current_q:
-        current_q["explanation"] = current_q["explanation"].strip()
-        current_q["tags"]["主題"] = auto_classify_topic(current_q)
-        questions.append(current_q)
-        
-    return questions
-
-# --- 5. 網頁介面設計 ---
-st.set_page_config(page_title="國考題庫極速轉檔", page_icon="⚡", layout="wide")
-st.title("⚡ 國考題庫：極速轉檔工具 (支援圖片壓縮版)")
-
-col1, col2 = st.columns([1, 2])
-with col1:
-    uploaded_file = st.file_uploader("上傳含有圖片的 Word 檔案 (.docx)", type=['docx'])
-    if uploaded_file is not None:
-        with st.spinner('正在抽取圖文與壓縮圖片中，請稍候...'):
             try:
-                file_stream = io.BytesIO(uploaded_file.read())
-                lines = extract_raw_text(file_stream)
-                parsed_data = parse_unified_format(lines)
-                st.session_state['parsed_data'] = parsed_data
-                st.session_state['file_name'] = uploaded_file.name
-                st.success("✅ 解析完成！圖片已自動壓縮並封裝，年份與主題分類皆已恢復。")
-            except Exception as e:
-                st.error(f"❌ 發生錯誤：{e}")
+                q_num = int(q_match.group('num'))
+            except:
+                q_num = 0 # 萬一題號不是數字
+                
+            q_text = q_match.group('text').strip()
+            
+            current_q = {
+                "question_number": q_num,
+                "answer": ans,
+                "explanation": "",
+                "tags": {
+                    "年份": current_year,
+                    "主題": "未分類"
+                },
+                "_raw_text": q_text
+            }
+            continue
+            
+        # --- 階段 C：判斷是否為解析開頭 ---
+        exp_match = exp_pattern.match(text)
+        if exp_match and current_q:
+            current_q["explanation"] = exp_match.group(1).strip()
+            continue
+            
+        # --- 階段 D：如果都不是，就是多行內容的延續 ---
+        if current_q:
+            # 防呆：如果「解析」藏在同一行的中後段
+            if re.search(r'解\s*析\s*[:\s]', text, re.IGNORECASE):
+                parts = re.split(r'解\s*析\s*[:\s]', text, maxsplit=1, flags=re.IGNORECASE)
+                if len(parts) > 1:
+                    if parts[0].strip():
+                        current_q["_raw_text"] += "\n" + parts[0].strip()
+                    current_q["explanation"] += parts[1].strip()
+                    continue
 
-    if 'parsed_data' in st.session_state:
-        json_bytes = json.dumps(st.session_state['parsed_data'], ensure_ascii=False, indent=4).encode('utf-8')
-        st.download_button(
-            label="📥 下載含壓縮圖片之 JSON 題庫檔",
-            data=json_bytes,
-            file_name=st.session_state['file_name'].replace(".docx", "_輕量版.json"),
-            mime="application/json",
-            use_container_width=True
-        )
+            # 如果已經在讀解析了
+            if current_q["explanation"]:
+                current_q["explanation"] += "\n" + text
+            else:
+                # 否則就是題目或選項的換行
+                current_q["_raw_text"] += "\n" + text
+        else:
+            # 記錄沒有被歸類的行，通常是雜訊或轉檔失敗的題目
+            if len(text) > 5: # 忽略太短的雜訊
+                skipped_lines.append(f"[{current_year}] {text}")
 
-with col2:
-    st.subheader("🔍 解析結果預覽 (純文字檢視)")
-    if 'parsed_data' in st.session_state:
-        st.info("已啟用自動化圖片壓縮 (最大寬度 800px, JPEG 格式)。")
-        st.json(st.session_state['parsed_data'][:2])
+    # 迴圈結束，記得儲存最後一題
+    if current_q:
+        _extract_options_v2(current_q)
+        questions.append(current_q)
+
+    # 輸出成 JSON 檔案 (同時進行壓縮瘦身)
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(questions, f, ensure_ascii=False, separators=(',', ':'))
+        
+    print(f"\n🎉 轉換完成！共擷取了 {len(questions)} 題。")
+    print(f"💾 檔案已儲存至：{json_path}")
+
+    # 將跳過的行輸出成報告，方便您檢查 Word 檔
+    if skipped_lines:
+        report_path = json_path.replace(".json", "_漏題檢查報告.txt")
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write("⚠️ 以下是未被辨識為題目的文字，請檢查 Word 檔格式是否太過奇特：\n")
+            f.write("--------------------------------------------------\n")
+            for line in skipped_lines:
+                f.write(line + "\n")
+        print(f"📄 產生漏題檢查報告：{report_path} (請查看此檔案確認是否有題目漏抓)")
+
+
+def _extract_options_v2(q_dict):
+    """內部輔助函數：將題目與選項分離 (增強版)"""
+    raw = q_dict.pop("_raw_text", "")
+    
+    # 尋找 (A) 的模糊匹配
+    match_A = re.search(r'\(\s*A\s*\)', raw)
+    
+    if match_A:
+        q_dict["question_text"] = raw[:match_A.start()].strip()
+        opts_text = raw[match_A.start():]
+        
+        # 利用正規表達式抓取 (A)xxx (B)yyy
+        opt_pattern = re.compile(r'\(\s*(?P<key>[A-E])\s*\)\s*(?P<val>.*?)(?=(?:\(\s*[A-E]\s*\))|$)')
+        options = {}
+        for m in opt_pattern.finditer(opts_text):
+            options[m.group('key')] = m.group('val').strip()
+            
+        q_dict["options"] = options
+    else:
+        q_dict["question_text"] = raw.strip()
+        q_dict["options"] = {}
+
+# ==========================================
+# 執行區塊
+# ==========================================
+if __name__ == "__main__":
+    # 將您的 Word 檔放在同一層資料夾，並確認檔名正確
+    input_docx = "臨床血清免疫學解析.docx"  # 請確認檔名
+    output_json = "臨床血清免疫學_修復版.json" # 產生一個新檔名
+    
+    if os.path.exists(input_docx):
+        convert_docx_to_json_super_loose(input_docx, output_json)
+    else:
+        print(f"⚠️ 找不到檔案 {input_docx}，請確認檔案是否放在同一個資料夾中！")
