@@ -6,7 +6,7 @@ import re
 import json
 import io
 import base64
-from PIL import Image  # 新增：用於圖片壓縮處理
+from PIL import Image
 
 # --- 1. 抽取純文字與圖片引擎 (圖片壓縮升級版) ---
 def extract_raw_text(file_stream):
@@ -17,33 +17,20 @@ def extract_raw_text(file_stream):
         para_text = ""
         for run in para.runs:
             para_text += run.text
-            # 尋找並提取 Word 中的圖片
             for blip in run._element.xpath('.//*[local-name()="blip"]'):
                 embed = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
                 if embed:
                     try:
                         image_part = run.part.rels[embed].target_part
                         image_data = image_part.blob
-                        
-                        # --- 圖片壓縮處理區塊 ---
                         img = Image.open(io.BytesIO(image_data))
-                        
-                        # 若為帶透明度的 PNG 或其他格式，統一轉為 RGB 以便存為 JPEG
                         if img.mode in ("RGBA", "P"):
                             img = img.convert("RGB")
-                        
-                        # 限制最大寬高為 800px (等比例縮小，國考圖表此尺寸通常已足夠清晰)
                         img.thumbnail((800, 800), Image.Resampling.LANCZOS)
-                        
-                        # 將壓縮後的圖片存入暫存區 (使用 JPEG 格式，品質設為 75)
                         buffer = io.BytesIO()
                         img.save(buffer, format="JPEG", quality=75)
                         compressed_blob = buffer.getvalue()
-                        
-                        # 將壓縮後的圖片轉為 Base64 字串
                         b64_str = base64.b64encode(compressed_blob).decode('utf-8')
-                        
-                        # 插入特殊標記，統一標示為 jpeg
                         para_text += f"\n[IMAGE_BASE64:data:image/jpeg;base64,{b64_str}]\n"
                     except Exception as e:
                         pass
@@ -78,10 +65,13 @@ def extract_tags_and_clean(text, current_tags):
     clean_exp = re.sub(r'\([^\)]*非常簡單[^\)]*\)', '', clean_exp)
     return clean_exp.strip('", '), current_tags
 
-# --- 3. 自動主題分類引擎 ---
+# --- 3. 自動主題分類引擎 (排除圖片干擾版) ---
 def auto_classify_topic(q_dict):
     text = q_dict["question_text"] + " " + q_dict.get("explanation", "")
     for opt in q_dict["options"].values(): text += " " + opt
+    
+    # 修正重點 1：先移除 Base64 圖片亂碼，避免干擾關鍵字比對
+    text = re.sub(r'\[IMAGE_BASE64:[^\]]+\]', '', text)
     text = text.upper()
     
     topics = {
@@ -113,15 +103,18 @@ def parse_unified_format(lines):
     current_year = "未分類" 
     last_opt = None
     
-    year_pattern = re.compile(r'(\d{3})\s*年\s*(第[一二]次)')
+    # 修正重點 2：放寬年份抓取，不再強求必須有「醫檢師」三個字
+    year_pattern = re.compile(r'(\d{2,4})\s*年.*?第?\s*[一二12]\s*次?')
     opt_pattern = re.compile(r'\(([A-E])\)\s*(.*?)(?=\s*\([A-E]\)|$)')
     
     for line in lines:
         clean_line = line.strip()
+        if not clean_line: continue
         
         year_match = year_pattern.search(clean_line)
-        if year_match and "醫檢師" in clean_line: 
-            current_year = f"{year_match.group(1)}年{year_match.group(2)}"
+        if year_match and ("次" in clean_line or "醫檢" in clean_line or "解析" in clean_line or "試題" in clean_line):
+            # 濾除多餘空白，確保年份格式一致 (如: 106年第二次)
+            current_year = year_match.group(0).replace(" ", "")
             continue
             
         q_match_full = re.match(r'^\s*\(([^)]+)\)\s*(\d+)[\.、]\s*(.*)', clean_line)
@@ -152,6 +145,7 @@ def parse_unified_format(lines):
                 current_q["tags"]["主題"] = auto_classify_topic(current_q)
                 questions.append(current_q)
             
+            # 初始化時就會帶入正確抓取到的 current_year
             current_q = {
                 "question_number": num,
                 "question_text": q_text,
@@ -181,8 +175,9 @@ def parse_unified_format(lines):
                 last_opt = opt_letter
             continue
             
-        if "解  析:" in clean_line or "解析:" in clean_line or "解析：" in clean_line:
-            exp_text = re.sub(r'^.*?(?:解\s*析)[:：]\s*', '', clean_line)
+        # 修正重點 3：放寬解析開頭的辨識，容許空白
+        if re.search(r'解\s*析\s*[:：]', clean_line):
+            exp_text = re.sub(r'^.*?(?:解\s*析)\s*[:：]\s*', '', clean_line)
             clean_exp, updated_tags = extract_tags_and_clean(exp_text, current_q["tags"])
             current_q["tags"] = updated_tags
             current_q["explanation"] += clean_exp + "\n"
@@ -199,6 +194,7 @@ def parse_unified_format(lines):
             if clean_exp:
                 current_q["explanation"] += clean_exp + "\n"
 
+    # 確保最後一題也有順利加上主題分類
     if current_q:
         current_q["explanation"] = current_q["explanation"].strip()
         current_q["tags"]["主題"] = auto_classify_topic(current_q)
@@ -221,12 +217,11 @@ with col1:
                 parsed_data = parse_unified_format(lines)
                 st.session_state['parsed_data'] = parsed_data
                 st.session_state['file_name'] = uploaded_file.name
-                st.success("✅ 解析完成！圖片已自動壓縮並封裝。")
+                st.success("✅ 解析完成！圖片已自動壓縮並封裝，年份與主題分類皆已恢復。")
             except Exception as e:
                 st.error(f"❌ 發生錯誤：{e}")
 
     if 'parsed_data' in st.session_state:
-        # 優化點：將 JSON 字串轉為 Bytes 傳遞，減輕 Streamlit 下載按鈕的記憶體負擔
         json_bytes = json.dumps(st.session_state['parsed_data'], ensure_ascii=False, indent=4).encode('utf-8')
         st.download_button(
             label="📥 下載含壓縮圖片之 JSON 題庫檔",
