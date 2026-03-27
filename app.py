@@ -68,8 +68,8 @@ def auto_categorize(q_dict, mapping):
 # --- 網頁介面開始 ---
 st.set_page_config(page_title="國考題庫轉檔與協作系統", page_icon="⚙️", layout="wide")
 
-st.title("⚙️ 國考題庫轉檔與協作系統 (V8 雙引擎版)")
-st.write("這套系統為降低教師負擔而生。請先將 Word 轉為 Excel 供老師校對，確認無誤後再將 Excel 轉為最終題庫。")
+st.title("⚙️ 國考題庫轉檔與協作系統 (終極防呆版)")
+st.write("這套系統為降低教師負擔而生。匯出的 Excel 已內建智慧下拉選單，防止老師分類不統一。")
 
 tab1, tab2 = st.tabs(["📝 階段一：Word 轉 Excel (AI 初步掃描)", "💾 階段二：Excel 轉 JSON (最終題庫產出)"])
 
@@ -78,7 +78,7 @@ tab1, tab2 = st.tabs(["📝 階段一：Word 轉 Excel (AI 初步掃描)", "💾
 # ==========================================
 with tab1:
     st.subheader("🧠 第一步：設定初步分類字典 (選填)")
-    st.info("系統會盡力幫您初步分類。沒分好的部分，等一下匯出 Excel 後老師再手動改就好！")
+    st.info("系統會依此字典初步分類，並將這些主題轉化為 Excel 裡的下拉選單選項！")
     
     default_mapping = {
         "過敏反應": ["IgE", "過敏", "氣喘", "hypersensitivity"],
@@ -100,8 +100,8 @@ with tab1:
     uploaded_word = st.file_uploader("選擇 Word 檔案 (.docx)", type=["docx"], key="word_uploader")
 
     if uploaded_word is not None:
-        if st.button("🚀 產出 Excel 給老師校對", type="primary", use_container_width=True):
-            with st.spinner("正在掃描 Word 並產生 Excel 表格..."):
+        if st.button("🚀 產出含下拉選單的 Excel", type="primary", use_container_width=True):
+            with st.spinner("正在掃描 Word 並植入防呆下拉選單..."):
                 try:
                     doc = docx.Document(uploaded_word)
                     all_lines = []
@@ -158,7 +158,7 @@ with tab1:
                     if current_q:
                         _extract_options(current_q); _extract_tags_from_all(current_q); auto_categorize(current_q, topic_mapping); questions.append(current_q)
 
-                    # --- 轉換為 Excel 格式 ---
+                    # --- 轉換為 Excel 格式，並植入下拉選單 ---
                     if questions:
                         excel_rows = []
                         for q in questions:
@@ -166,7 +166,7 @@ with tab1:
                             excel_rows.append({
                                 "年份": q["tags"].get("年份", ""),
                                 "題號": q.get("question_number", ""),
-                                "主題 (請在此修正)": q["tags"].get("主題", ""),
+                                "主題 (下拉選單)": q["tags"].get("主題", ""),
                                 "題目": q.get("question_text", ""),
                                 "選項A": opts.get("A", ""),
                                 "選項B": opts.get("B", ""),
@@ -178,25 +178,47 @@ with tab1:
                             
                         df = pd.DataFrame(excel_rows)
                         
-                        # 匯出至 BytesIO
                         output = io.BytesIO()
                         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                             df.to_excel(writer, index=False, sheet_name='待校對題庫')
                             
-                            # 美化 Excel 寬度
+                            workbook = writer.book
                             worksheet = writer.sheets['待校對題庫']
+                            
+                            # 美化 Excel 欄位寬度
                             worksheet.set_column('A:B', 8)
-                            worksheet.set_column('C:C', 15)
-                            worksheet.set_column('D:D', 40)
-                            worksheet.set_column('E:H', 20)
+                            worksheet.set_column('C:C', 20)
+                            worksheet.set_column('D:D', 45)
+                            worksheet.set_column('E:H', 22)
                             worksheet.set_column('I:I', 10)
-                            worksheet.set_column('J:J', 40)
+                            worksheet.set_column('J:J', 50)
+                            
+                            # 🌟 建立專屬下拉選單來源工作表
+                            topic_sheet = workbook.add_worksheet('主題清單(可擴充)')
+                            topic_sheet.write('A1', '🔽 系統預設主題 (您可以在下方空白處新增，將自動同步至下拉選單)')
+                            topic_sheet.set_column('A:A', 50)
+                            
+                            # 整理所有主題 (預設加入未分類)
+                            all_topics = ["未分類"] + list(topic_mapping.keys())
+                            for i, t in enumerate(all_topics):
+                                topic_sheet.write(i + 1, 0, t)
+                                
+                            # 🌟 在主表的 C 欄套用下拉選單限制 (範圍拉大到 A2:A200 讓老師有空間新增)
+                            worksheet.data_validation('C2:C10000', {
+                                'validate': 'list',
+                                'source': "='主題清單(可擴充)'!$A$2:$A$200",
+                                'input_title': '選取分類主題',
+                                'input_message': '請點擊箭頭選擇主題。若需新增大類別，請至下方【主題清單】工作表擴充。',
+                                'error_type': 'warning',
+                                'error_title': '新增了未知主題',
+                                'error_message': '您輸入的主題不在目前的下拉清單中。系統依然會接受，但建議您統一將新主題新增至【主題清單】工作表中以防名稱混亂！'
+                            })
 
-                        st.success(f"🎉 成功初步解析了 **{len(questions)}** 題！請下載 Excel 檔發派給各科老師校對。")
+                        st.success(f"🎉 成功解析並加上防呆選單！共 **{len(questions)}** 題。請下載發派給各科老師。")
                         st.download_button(
-                            label="📊 下載待校對 Excel 檔",
+                            label="📊 下載待校對 Excel 檔 (含自動下拉選單)",
                             data=output.getvalue(),
-                            file_name=uploaded_word.name.replace(".docx", "_待校對.xlsx"),
+                            file_name=uploaded_word.name.replace(".docx", "_含防呆選單待校對.xlsx"),
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             type="primary",
                             use_container_width=True
@@ -211,7 +233,7 @@ with tab1:
 # ==========================================
 with tab2:
     st.subheader("📥 上傳老師校對完畢的 Excel 檔")
-    st.info("當各科老師在 Excel 裡把「主題」和「錯字」都改好後，將檔案上傳至此，系統會直接將其封裝成前台可用的 JSON 系統題庫！")
+    st.info("當老師在 Excel 裡將主題修改完畢後，上傳至此，系統會直接打包成國考平台可用的題庫！")
     
     uploaded_excel = st.file_uploader("選擇已校對的 Excel 檔案 (.xlsx)", type=["xlsx"], key="excel_uploader")
 
@@ -219,15 +241,14 @@ with tab2:
         if st.button("💾 封裝為最終 JSON 題庫", type="primary", use_container_width=True):
             with st.spinner("正在讀取 Excel 並封裝為系統題庫..."):
                 try:
-                    df = pd.read_excel(uploaded_excel)
-                    df = df.fillna("") # 將 NaN 轉換為空字串
+                    # 只讀取主要工作表
+                    df = pd.read_excel(uploaded_excel, sheet_name='待校對題庫')
+                    df = df.fillna("") 
                     
                     final_questions = []
                     for idx, row in df.iterrows():
-                        # 避開完全空白的行
                         if str(row.get("題目", "")).strip() == "": continue
                             
-                        # 重組選項
                         opts = {}
                         for k in ['A', 'B', 'C', 'D']:
                             val = str(row.get(f"選項{k}", "")).strip()
@@ -242,7 +263,7 @@ with tab2:
                             "explanation": str(row.get("解析", "")).strip(),
                             "tags": {
                                 "年份": str(row.get("年份", "")).strip(),
-                                "主題": str(row.get("主題 (請在此修正)", "")).strip()
+                                "主題": str(row.get("主題 (下拉選單)", "")).strip()
                             },
                             "question_text": str(row.get("題目", "")).strip(),
                             "options": opts
@@ -251,9 +272,7 @@ with tab2:
                         
                     if final_questions:
                         st.success(f"🎉 封裝成功！共匯入 **{len(final_questions)}** 題完美確認版考題！")
-                        
                         json_str = json.dumps(final_questions, ensure_ascii=False, separators=(',', ':'))
-                        
                         st.download_button(
                             label="📥 下載最終上線版 JSON 題庫",
                             data=json_str,
@@ -262,9 +281,7 @@ with tab2:
                             type="primary",
                             use_container_width=True
                         )
-                        st.markdown("⚠️ **下一步：** 帶著下載好的 JSON 檔案，前往您的【國考平台前台 -> 管理員登入 -> 科目與題庫管理】進行上傳發布！")
                     else:
                         st.error("😭 Excel 檔案內似乎沒有有效的題目資料。")
-                        
                 except Exception as e:
-                    st.error(f"讀取 Excel 失敗，請確認檔案格式是否正確：{e}")
+                    st.error(f"讀取 Excel 失敗，請確認上傳的檔案是否為階段一產出的 Excel：{e}")
