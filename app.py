@@ -5,38 +5,31 @@ import re
 import pandas as pd
 import io
 import uuid
-import base64
+import zipfile
 from PIL import Image
 
 # ==========================================
 # 內部輔助函數 (文字、圖片壓縮與標籤清洗)
 # ==========================================
 def compress_image_blob(blob):
-    """🌟 智慧圖片壓縮引擎：自動縮圖並轉為高壓縮 JPEG"""
+    """智慧圖片壓縮引擎：自動縮圖並轉為高壓縮 JPEG"""
     try:
         img = Image.open(io.BytesIO(blob))
-        # 統一轉換為 RGB 格式 (去除透明背景以利轉存 JPEG)
         if img.mode != "RGB":
             img = img.convert("RGB")
-        
-        # 限制圖片最大尺寸 (800x800)，保持比例不變形
         img.thumbnail((800, 800), Image.Resampling.LANCZOS)
-        
-        # 輸出壓縮後的 JPEG
         out = io.BytesIO()
-        img.save(out, format="JPEG", quality=75) # 品質 75 是容量與畫質的最佳平衡
-        return out.getvalue(), "image/jpeg"
+        img.save(out, format="JPEG", quality=75) 
+        return out.getvalue()
     except Exception as e:
-        # 萬一遇到無法解析的特殊圖片格式，就退回使用原始檔案
-        return blob, None
+        return blob
 
 def get_para_text_with_images(para, image_db):
-    """提取文字並進行圖片壓縮轉換"""
+    """提取文字，並留下 [IMG: 檔名.jpg] 的輕量化佔位符"""
     full_text = para.text  
     img_placeholders = ""
     for run in para.runs:
         try:
-            # 抓取新版與舊版圖片標籤
             blips = run._element.xpath('.//*[local-name()="blip"]')
             imagedatas = run._element.xpath('.//*[local-name()="imagedata"]')
             
@@ -45,15 +38,12 @@ def get_para_text_with_images(para, image_db):
                       element.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
                 if rId:
                     part = para.part.related_parts[rId]
+                    compressed_blob = compress_image_blob(part.blob)
                     
-                    # 🌟 呼叫壓縮引擎！
-                    compressed_blob, mime_type = compress_image_blob(part.blob)
-                    final_mime = mime_type if mime_type else part.content_type
-                    
-                    b64 = base64.b64encode(compressed_blob).decode('utf-8')
-                    img_id = f"IMG_{uuid.uuid4().hex[:8]}"
-                    image_db[img_id] = f"[IMAGE_BASE64:data:{final_mime};base64,{b64}]"
-                    img_placeholders += f"\n[{img_id}]\n"
+                    # 🌟 改為實體檔案命名法
+                    img_filename = f"IMG_{uuid.uuid4().hex[:8]}.jpg"
+                    image_db[img_filename] = compressed_blob
+                    img_placeholders += f"\n[IMG: {img_filename}]\n"
         except:
             pass
     return full_text + img_placeholders
@@ -109,19 +99,6 @@ def auto_categorize(q_dict, mapping):
                 q_dict["tags"]["主題"] = topic
                 return 
 
-def replace_images_in_dict(d, img_db):
-    if isinstance(d, dict):
-        for k, v in d.items():
-            if isinstance(v, str):
-                for img_id, img_str in img_db.items():
-                    if f"[{img_id}]" in v:
-                        d[k] = v.replace(f"[{img_id}]", img_str)
-            else:
-                replace_images_in_dict(v, img_db)
-    elif isinstance(d, list):
-        for item in d:
-            replace_images_in_dict(item, img_db)
-
 def finalize_question(q_dict, topic_mapping):
     if not q_dict.get("explanation"):
         raw = q_dict.get("_raw_text", "")
@@ -139,24 +116,32 @@ def finalize_question(q_dict, topic_mapping):
     _extract_tags_from_all(q_dict)
     auto_categorize(q_dict, topic_mapping)
 
+def create_zip_package(json_data, image_db, filename_prefix):
+    """將 JSON 與所有實體圖片打包成 ZIP"""
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+        json_str = json.dumps(json_data, ensure_ascii=False, separators=(',', ':'))
+        zip_file.writestr(f"{filename_prefix}.json", json_str.encode('utf-8'))
+        
+        for img_name, img_bytes in image_db.items():
+            zip_file.writestr(f"images/{img_name}", img_bytes)
+    return zip_buffer.getvalue()
+
 # ==========================================
 # 網頁介面開始
 # ==========================================
-st.set_page_config(page_title="國考題庫轉檔與協作系統", page_icon="⚙️", layout="wide")
-
-st.title("⚙️ 國考題庫轉檔系統 (V17 圖片極限瘦身版)")
-st.write("內建智慧圖片壓縮引擎！大幅縮小 JSON 檔案容量，同時完美保留穿透表格提取解析的能力。")
-
-tab1, tab2, tab3 = st.tabs(["🚀 一鍵產出 JSON (推薦)", "📝 階段一：轉為 Excel 供校對", "💾 階段二：Excel 打包 JSON"])
+st.set_page_config(page_title="國考題庫轉檔系統", page_icon="⚙️", layout="wide")
+st.title("⚙️ 國考題庫轉檔系統 (V18 圖文分離版)")
+st.write("徹底解決系統 503 當機問題！產出的 ZIP 檔內含極輕量化 JSON 與獨立圖片資料夾。")
 
 default_mapping = {
-    "過敏反應": ["IgE", "過敏", "氣喘", "hypersensitivity"],
-    "腫瘤免疫": ["腫瘤", "癌症", "tumor", "cancer", "TSA", "TAA"],
-    "自體性免疫": ["自體免疫", "紅斑性狼瘡", "風濕", "SLE", "RA"],
-    "移植免疫": ["移植", "排斥", "GVHD", "MHC", "HLA"],
-    "先天性免疫": ["先天免疫", "巨噬細胞", "補體", "complement", "NK cell", "發炎"],
-    "細胞性免疫": ["T細胞", "CD4", "CD8", "T cell", "細胞毒殺"],
-    "體液性免疫": ["B細胞", "B cell", "抗體", "IgG", "IgM", "IgA", "漿細胞"]
+    "過敏反應": ["IgE", "過敏", "氣喘"],
+    "腫瘤免疫": ["腫瘤", "癌症", "tumor"],
+    "自體免疫": ["自體免疫", "紅斑性狼瘡", "風濕", "SLE"],
+    "移植免疫": ["移植", "排斥", "GVHD", "MHC"],
+    "先天性免疫": ["先天免疫", "巨噬細胞", "補體"],
+    "細胞性免疫": ["T細胞", "CD4", "CD8", "T cell"],
+    "體液性免疫": ["B細胞", "B cell", "抗體", "IgG"]
 }
 
 def parse_word_document(uploaded_file, topic_mapping):
@@ -250,107 +235,24 @@ def parse_word_document(uploaded_file, topic_mapping):
         
     return questions, image_db
 
-# ==========================================
-# Tab 1: 直接產出 JSON 
-# ==========================================
-with tab1:
-    st.info("直接將 Word 轉換為系統可讀的 JSON。內建圖片自動壓縮技術，產出的 JSON 小巧輕便！")
-    mapping_str_1 = st.text_area("關鍵字分類字典：", value=json.dumps(default_mapping, ensure_ascii=False, indent=4), height=150, key="map1")
-    try: topic_mapping_1 = json.loads(mapping_str_1)
-    except: topic_mapping_1 = default_mapping
-    
-    uploaded_word_1 = st.file_uploader("上傳 Word 題庫 (.docx)", type=["docx"], key="w1")
-    if uploaded_word_1 and st.button("🚀 產出最終 JSON 題庫", type="primary", use_container_width=True):
-        with st.spinner("正在啟動表格穿透與圖片壓縮掃描... (含有大量圖片時可能需數十秒，請稍候)"):
-            qs, img_db = parse_word_document(uploaded_word_1, topic_mapping_1)
-            if qs:
-                replace_images_in_dict(qs, img_db)
-                st.success(f"成功解析 {len(qs)} 題！共抽取並壓縮了 {len(img_db)} 張圖片。")
-                
-                # 極限壓縮 JSON 文字格式
-                json_str = json.dumps(qs, ensure_ascii=False, separators=(',', ':'))
-                
-                st.download_button("💾 下載 JSON 上線檔", data=json_str, file_name=uploaded_word_1.name.replace(".docx", "_極限瘦身版.json"), mime="application/json", type="primary", use_container_width=True)
+mapping_str_1 = st.text_area("關鍵字分類字典：", value=json.dumps(default_mapping, ensure_ascii=False, indent=4), height=150)
+try: topic_mapping_1 = json.loads(mapping_str_1)
+except: topic_mapping_1 = default_mapping
 
-# ==========================================
-# Tab 2 & 3: Excel 協作流程
-# ==========================================
-with tab2:
-    st.info("讓老師用 Excel 校對分類。⚠️ 圖片會以 [IMG_xxx] 顯示以防 Excel 崩潰，轉回 JSON 時會復原！")
-    mapping_str_2 = st.text_area("關鍵字分類字典：", value=json.dumps(default_mapping, ensure_ascii=False, indent=4), height=150, key="map2")
-    try: topic_mapping_2 = json.loads(mapping_str_2)
-    except: topic_mapping_2 = default_mapping
-    
-    uploaded_word_2 = st.file_uploader("上傳 Word 題庫 (.docx)", type=["docx"], key="w2")
-    if uploaded_word_2 and st.button("🚀 產出待校對 Excel 與圖片暫存檔", type="primary", use_container_width=True):
-        with st.spinner("正在產生 Excel 並壓縮暫存圖片..."):
-            qs, img_db = parse_word_document(uploaded_word_2, topic_mapping_2)
-            if qs:
-                excel_rows = []
-                for q in qs:
-                    opts = q.get("options", {})
-                    excel_rows.append({
-                        "年份": q["tags"].get("年份", ""),
-                        "題號": q.get("question_number", ""),
-                        "主題 (下拉選單)": q["tags"].get("主題", ""),
-                        "題目": q.get("question_text", ""),
-                        "選項A": opts.get("A", ""), "選項B": opts.get("B", ""),
-                        "選項C": opts.get("C", ""), "選項D": opts.get("D", ""),
-                        "正確答案": q.get("answer", ""), "解析": q.get("explanation", "")
-                    })
-                df = pd.DataFrame(excel_rows)
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df.to_excel(writer, index=False, sheet_name='待校對題庫')
-                    workbook = writer.book
-                    worksheet = writer.sheets['待校對題庫']
-                    worksheet.set_column('A:B', 8); worksheet.set_column('C:C', 20); worksheet.set_column('D:D', 45)
-                    worksheet.set_column('E:H', 22); worksheet.set_column('I:I', 10); worksheet.set_column('J:J', 50)
-                    
-                    topic_sheet = workbook.add_worksheet('主題清單(可擴充)')
-                    topic_sheet.write('A1', '🔽 系統預設主題 (往下新增將自動同步)')
-                    topic_sheet.set_column('A:A', 50)
-                    for i, t in enumerate(["未分類"] + list(topic_mapping_2.keys())):
-                        topic_sheet.write(i + 1, 0, t)
-                    worksheet.data_validation('C2:C10000', {'validate': 'list', 'source': "='主題清單(可擴充)'!$A$2:$A$200", 'error_type': 'warning'})
-
-                st.success(f"成功解析 {len(qs)} 題！")
-                st.download_button("📊 1. 下載待校對 Excel 檔", data=output.getvalue(), file_name=uploaded_word_2.name.replace(".docx", "_校對用.xlsx"), mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-                
-                # 圖片庫也使用極致壓縮
-                img_json = json.dumps(img_db, ensure_ascii=False, separators=(',', ':'))
-                st.download_button("🖼️ 2. 下載圖片暫存檔 (image_db.json)", data=img_json, file_name="image_db.json", mime="application/json", use_container_width=True)
-
-with tab3:
-    st.info("上傳校對好的 Excel，並附上圖片暫存檔，系統會將圖片與解析完美還原至題庫中！")
-    uploaded_excel = st.file_uploader("1. 上傳校對完的 Excel (.xlsx)", type=["xlsx"])
-    uploaded_img_db = st.file_uploader("2. 上傳圖片暫存檔 (image_db.json) (若本題無圖片可略過)", type=["json"])
-
-    if uploaded_excel and st.button("💾 封裝為最終 JSON 題庫", type="primary", use_container_width=True):
-        with st.spinner("正在封裝題庫並還原圖片..."):
-            try:
-                img_db = json.load(uploaded_img_db) if uploaded_img_db else {}
-                df = pd.read_excel(uploaded_excel, sheet_name='待校對題庫').fillna("")
-                
-                final_questions = []
-                for idx, row in df.iterrows():
-                    if str(row.get("題目", "")).strip() == "": continue
-                    opts = {k: str(row.get(f"選項{k}", "")).strip() for k in ['A', 'B', 'C', 'D'] if str(row.get(f"選項{k}", "")).strip()}
-                    q_num = str(row.get("題號", "0")).strip()
-                    q_num = int(float(q_num)) if q_num.replace('.', '', 1).isdigit() else 0
-                    
-                    q = {
-                        "question_number": q_num, "answer": str(row.get("正確答案", "")).strip(),
-                        "explanation": str(row.get("解析", "")).strip(),
-                        "tags": {"年份": str(row.get("年份", "")).strip(), "主題": str(row.get("主題 (下拉選單)", "")).strip()},
-                        "question_text": str(row.get("題目", "")).strip(), "options": opts
-                    }
-                    final_questions.append(q)
-                    
-                if final_questions:
-                    replace_images_in_dict(final_questions, img_db)
-                    st.success(f"🎉 封裝成功！共匯入 {len(final_questions)} 題！")
-                    json_str = json.dumps(final_questions, ensure_ascii=False, separators=(',', ':'))
-                    st.download_button("📥 下載最終上線版 JSON", data=json_str, file_name=uploaded_excel.name.replace(".xlsx", "_最終上線版.json"), mime="application/json", type="primary", use_container_width=True)
-            except Exception as e:
-                st.error(f"錯誤：{e}")
+uploaded_word_1 = st.file_uploader("上傳 Word 題庫 (.docx)", type=["docx"])
+if uploaded_word_1 and st.button("🚀 產出 ZIP 題庫包", type="primary", use_container_width=True):
+    with st.spinner("正在執行圖文分離與打包作業..."):
+        qs, img_db = parse_word_document(uploaded_word_1, topic_mapping_1)
+        if qs:
+            prefix = uploaded_word_1.name.replace(".docx", "")
+            zip_bytes = create_zip_package(qs, img_db, prefix)
+            
+            st.success(f"成功解析 {len(qs)} 題！共抽取 {len(img_db)} 張圖片，已完美分離打包！")
+            st.download_button(
+                label="📦 下載 ZIP 題庫包 (含 JSON 與獨立 images 資料夾)", 
+                data=zip_bytes, 
+                file_name=f"{prefix}_題庫包.zip", 
+                mime="application/zip", 
+                type="primary", 
+                use_container_width=True
+            )
