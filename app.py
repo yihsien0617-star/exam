@@ -175,13 +175,18 @@ st.write("已修正圖文分離錯誤！智慧掃描能完美判斷圖片歸屬�
 tab1, tab2, tab3 = st.tabs(["🚀 一鍵產出 ZIP 題庫包", "📝 階段一：轉為 Excel 供校對", "💾 階段二：Excel 打包 ZIP"])
 
 default_mapping = {
-    "過敏反應": ["IgE", "過敏", "氣喘"],
-    "腫瘤免疫": ["腫瘤", "癌症", "tumor"],
-    "自體免疫": ["自體免疫", "紅斑性狼瘡", "風濕", "SLE"],
-    "移植免疫": ["移植", "排斥", "GVHD", "MHC"],
-    "先天免疫": ["先天免疫", "巨噬細胞", "補體"],
-    "細胞免疫": ["T細胞", "CD4", "CD8", "T cell"],
-    "體液免疫": ["B細胞", "B cell", "抗體", "IgG"]
+        "先天免疫與發炎反應": ["發炎", "白血球", "吞噬", "巨噬細胞", "MACROPHAGE", "NEUTROPHIL", "NK細胞", "自然殺手", "TLR", "先天免疫", "發燒", "C-REACTIVE", "CRP"],
+        "補體系統": ["補體", "COMPLEMENT", "C3", "C4", "C5", "MAC", "古典途徑", "替代途徑", "凝集素途徑", "C1Q"],
+        "抗體與免疫球蛋白": ["抗體", "免疫球蛋白", "IGG", "IGA", "IGM", "IGE", "IGD", "ISOTYPE", "輕鏈", "重鏈", "FAB", "FC", "ALLOTYPE", "IDIOTYPE"],
+        "T細胞與細胞免疫": ["T細胞", "T CELL", "CD4", "CD8", "TH1", "TH2", "TREG", "胸腺", "細胞激素", "CYTOKINE", "IL-", "干擾素", "IFN", "穿孔素", "FAS"],
+        "B細胞與體液免疫": ["B細胞", "B CELL", "漿細胞", "PLASMA CELL", "記憶B", "BCR"],
+        "MHC與移植免疫": ["MHC", "HLA", "移植", "排斥", "組織相容", "GRAFT", "GVHD"],
+        "過敏反應": ["過敏", "HYPERSENSITIVITY", "氣喘", "肥大細胞", "MAST CELL", "組織胺", "第一型", "第二型", "第三型", "第四型", "ARTHUS", "接觸性皮膚炎"],
+        "自體免疫疾病": ["自體免疫", "AUTOIMMUNE", "ANA", "SLE", "紅斑性狼瘡", "類風濕", "RF", "重症肌無力", "橋本氏", "HASHIMOTO", "GRAVES", "SCLERODERMA", "硬皮症", "乾燥症"],
+        "腫瘤免疫": ["腫瘤", "癌症", "TUMOR", "CANCER", "癌", "CEA", "AFP", "PSA", "腫瘤標記", "免疫檢查點", "PD-1", "CTLA-4", "CAR-T", "SIPULEUCEL"],
+        "疫苗與預防接種": ["疫苗", "VACCINE", "佐劑", "ADJUVANT", "被動免疫", "主動免疫", "減毒", "類毒素", "TOXOID"],
+        "免疫檢驗技術": ["ELISA", "流式細胞", "FLOW CYTOMETRY", "螢光", "沉澱", "凝集", "西方墨點", "WESTERN BLOT", "免疫分析", "RIA", "VDRL", "RPR", "免疫電泳"]
+
 }
 
 def parse_word_document(uploaded_file, topic_mapping):
