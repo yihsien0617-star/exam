@@ -11,11 +11,12 @@ import base64
 # 內部輔助函數 (文字、圖片與標籤清洗)
 # ==========================================
 def get_para_text_with_images(para, image_db):
-    """🌟 完美復刻 V1 的 100% 不漏字抓取，並安全提取圖片"""
-    full_text = para.text  # 直接抓取完整段落，無視底層複雜格式，絕不漏字！
+    """🌟 雙引擎圖片萃取：同時支援新版(DrawingML)與舊版(VML)圖片格式"""
+    full_text = para.text  
     img_placeholders = ""
     for run in para.runs:
         try:
+            # 1. 抓取新版 Word 圖片
             blips = run._element.xpath('.//*[local-name()="blip"]')
             for blip in blips:
                 rId = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
@@ -25,9 +26,19 @@ def get_para_text_with_images(para, image_db):
                     img_id = f"IMG_{uuid.uuid4().hex[:8]}"
                     image_db[img_id] = f"[IMAGE_BASE64:data:{part.content_type};base64,{b64}]"
                     img_placeholders += f"\n[{img_id}]\n"
+            
+            # 2. 抓取舊版 Word 圖片 (解決部分圖片漏抓問題)
+            imagedatas = run._element.xpath('.//*[local-name()="imagedata"]')
+            for md in imagedatas:
+                rId = md.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
+                if rId:
+                    part = para.part.related_parts[rId]
+                    b64 = base64.b64encode(part.blob).decode('utf-8')
+                    img_id = f"IMG_{uuid.uuid4().hex[:8]}"
+                    image_db[img_id] = f"[IMAGE_BASE64:data:{part.content_type};base64,{b64}]"
+                    img_placeholders += f"\n[{img_id}]\n"
         except:
             pass
-    # 將圖片安全地附掛在該段文字的最後面
     return full_text + img_placeholders
 
 def normalize_line(text):
@@ -37,7 +48,6 @@ def normalize_line(text):
     return text.strip()
 
 def extract_and_remove_tags(text, q_dict):
-    """只抓特定標籤，絕不誤吃解析本體"""
     if not text: return text
     keywords = ["難度", "再現性", "主題", "分類", "單元", "章節"]
     for kw in keywords:
@@ -102,19 +112,19 @@ def replace_images_in_dict(d, img_db):
 # ==========================================
 st.set_page_config(page_title="國考題庫轉檔與協作系統", page_icon="⚙️", layout="wide")
 
-st.title("⚙️ 國考題庫轉檔系統 (V11 完美文字回歸版)")
-st.write("已完美結合初代 100% 抓字準確率與全自動圖片萃取功能！")
+st.title("⚙️ 國考題庫轉檔系統 (V12 暴力解析與雙圖片引擎版)")
+st.write("完全無視排版格式！只要字串內出現「解析」即強制切割，並支援新舊版圖片萃取。")
 
 tab1, tab2, tab3 = st.tabs(["🚀 一鍵產出 JSON (推薦)", "📝 階段一：轉為 Excel 供校對", "💾 階段二：Excel 打包 JSON"])
 
 default_mapping = {
     "過敏反應": ["IgE", "過敏", "氣喘", "hypersensitivity"],
     "腫瘤免疫": ["腫瘤", "癌症", "tumor", "cancer", "TSA", "TAA"],
-    "自體免疫": ["自體免疫", "紅斑性狼瘡", "風濕", "SLE", "RA"],
+    "自體性免疫": ["自體免疫", "紅斑性狼瘡", "風濕", "SLE", "RA"],
     "移植免疫": ["移植", "排斥", "GVHD", "MHC", "HLA"],
     "先天免疫": ["先天免疫", "巨噬細胞", "補體", "complement", "NK cell", "發炎"],
-    "細胞免疫": ["T細胞", "CD4", "CD8", "T cell", "細胞毒殺"],
-    "體液免疫": ["B細胞", "B cell", "抗體", "IgG", "IgM", "IgA", "漿細胞"]
+    "細胞性免疫": ["T細胞", "CD4", "CD8", "T cell", "細胞毒殺"],
+    "體液性免疫": ["B細胞", "B cell", "抗體", "IgG", "IgM", "IgA", "漿細胞"]
 }
 
 def parse_word_document(uploaded_file, topic_mapping):
@@ -136,13 +146,10 @@ def parse_word_document(uploaded_file, topic_mapping):
     year_pattern = re.compile(r'(\d{2,4})\s*年')
     q_start_pattern = re.compile(r'^.*?[\(]\s*(?P<ans>[A-Ea-e,皆全對送分]+)\s*[\)]\s*(?P<num>\d+)\s*[.、\s]\s*(?P<text>.*)')
     topic_pattern = re.compile(r'^(?:【([^】]+)】|(?:\w{2}[:：]\s*)(.+))$')
-    
-    # 🌟 無敵解析切割法 (相容: 【解析】、解析:、解 析 、[解答] 等各種格式，沒有冒號也抓得到！)
-    exp_pattern = re.compile(r'^[\"\'\,\.\-\s【\[<]*解\s*答?\s*析[\s:：\]】>]*(.*)', re.IGNORECASE)
 
     for text in all_lines:
         t_match = topic_pattern.match(text)
-        if t_match and not q_start_pattern.search(text) and not exp_pattern.search(text):
+        if t_match and not q_start_pattern.search(text) and not re.search(r'解\s*析', text):
             if current_q:
                 _extract_options(current_q); _extract_tags_from_all(current_q); auto_categorize(current_q, topic_mapping); questions.append(current_q)
                 current_q = None
@@ -150,7 +157,7 @@ def parse_word_document(uploaded_file, topic_mapping):
             continue
 
         year_match = year_pattern.search(text)
-        if year_match and not q_start_pattern.search(text) and not exp_pattern.search(text): 
+        if year_match and not q_start_pattern.search(text) and not re.search(r'解\s*析', text): 
             if current_q:
                 _extract_options(current_q); _extract_tags_from_all(current_q); auto_categorize(current_q, topic_mapping); questions.append(current_q)
                 current_q = None
@@ -166,23 +173,26 @@ def parse_word_document(uploaded_file, topic_mapping):
             current_q = {"question_number": q_num, "answer": ans, "explanation": "", "tags": {"年份": current_year, "主題": current_topic}, "_raw_text": q_match.group('text').strip()}
             continue
             
-        exp_match = exp_pattern.match(text)
-        if exp_match and current_q:
-            current_q["explanation"] = exp_match.group(1).strip()
-            continue
-            
         if current_q:
-            # 同行解析暴力擷取
-            hidden_exp_match = re.search(r'([\"\'\,\.\-\s【\[<]*)(解\s*答?\s*析[\s:：\]】>]+)(.*)', text, re.IGNORECASE)
-            if hidden_exp_match:
-                q_part = text[:hidden_exp_match.start(1)].strip()
+            # 🌟 終極暴力破解法：只要整行裡面有 "解析" 這兩個字，直接一刀切開！
+            exp_match = re.search(r'(解\s*答?\s*析)[\s:：\]】>\"\',，]*(.*)', text, re.IGNORECASE)
+            
+            if exp_match and not current_q["explanation"]:
+                # 把「解析」前面的字(如果有的話，例如黏在選項後面) 切割還給題目
+                q_part = text[:exp_match.start(1)].strip(' ,"\'.')
                 if q_part:
                     current_q["_raw_text"] += "\n" + q_part
-                current_q["explanation"] += text[hidden_exp_match.end(2):].strip()
+                # 把「解析」後面的字正式收編
+                current_q["explanation"] = exp_match.group(2).strip()
+                continue
+            elif exp_match and current_q["explanation"]:
+                current_q["explanation"] += "\n" + text
                 continue
 
-            if current_q["explanation"]: current_q["explanation"] += "\n" + text
-            else: current_q["_raw_text"] += "\n" + text
+            if current_q["explanation"]: 
+                current_q["explanation"] += "\n" + text
+            else: 
+                current_q["_raw_text"] += "\n" + text
 
     if current_q:
         _extract_options(current_q); _extract_tags_from_all(current_q); auto_categorize(current_q, topic_mapping); questions.append(current_q)
@@ -193,26 +203,26 @@ def parse_word_document(uploaded_file, topic_mapping):
 # Tab 1: 直接產出 JSON 
 # ==========================================
 with tab1:
-    st.info("直接將 Word 轉換為系統可讀的 JSON，完美保留初代文字精準度，解析 100% 完整呈現！")
+    st.info("直接將 Word 轉換為系統可讀的 JSON。啟用暴力解析切分法，保證絕不漏接解析！")
     mapping_str_1 = st.text_area("關鍵字分類字典：", value=json.dumps(default_mapping, ensure_ascii=False, indent=4), height=150, key="map1")
     try: topic_mapping_1 = json.loads(mapping_str_1)
     except: topic_mapping_1 = default_mapping
     
     uploaded_word_1 = st.file_uploader("上傳 Word 題庫 (.docx)", type=["docx"], key="w1")
     if uploaded_word_1 and st.button("🚀 產出最終 JSON 題庫", type="primary", use_container_width=True):
-        with st.spinner("正在萃取圖片與解析..."):
+        with st.spinner("正在執行暴力解析掃描與圖片萃取..."):
             qs, img_db = parse_word_document(uploaded_word_1, topic_mapping_1)
             if qs:
                 replace_images_in_dict(qs, img_db)
                 st.success(f"成功解析 {len(qs)} 題！共抽取了 {len(img_db)} 張圖片。")
                 json_str = json.dumps(qs, ensure_ascii=False, separators=(',', ':'))
-                st.download_button("💾 下載 JSON 上線檔", data=json_str, file_name=uploaded_word_1.name.replace(".docx", "_完美解析版.json"), mime="application/json", type="primary", use_container_width=True)
+                st.download_button("💾 下載 JSON 上線檔", data=json_str, file_name=uploaded_word_1.name.replace(".docx", "_完美修復版.json"), mime="application/json", type="primary", use_container_width=True)
 
 # ==========================================
-# Tab 2: Word 轉 Excel
+# Tab 2 & 3: Excel 協作流程
 # ==========================================
 with tab2:
-    st.info("讓老師用 Excel 校對分類。⚠️ 系統會將圖片暫時替換為 [IMG_xxx] 標記以防 Excel 崩潰，轉回 JSON 時會自動復原！")
+    st.info("讓老師用 Excel 校對分類。⚠️ 圖片會以 [IMG_xxx] 顯示以防 Excel 崩潰，轉回 JSON 時會復原！")
     mapping_str_2 = st.text_area("關鍵字分類字典：", value=json.dumps(default_mapping, ensure_ascii=False, indent=4), height=150, key="map2")
     try: topic_mapping_2 = json.loads(mapping_str_2)
     except: topic_mapping_2 = default_mapping
@@ -255,9 +265,6 @@ with tab2:
                 img_json = json.dumps(img_db, ensure_ascii=False)
                 st.download_button("🖼️ 2. 下載圖片暫存檔 (image_db.json)", data=img_json, file_name="image_db.json", mime="application/json", use_container_width=True)
 
-# ==========================================
-# Tab 3: Excel 轉 JSON
-# ==========================================
 with tab3:
     st.info("上傳校對好的 Excel，並附上圖片暫存檔，系統會將圖片與解析完美還原至題庫中！")
     uploaded_excel = st.file_uploader("1. 上傳校對完的 Excel (.xlsx)", type=["xlsx"])
