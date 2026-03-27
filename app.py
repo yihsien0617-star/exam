@@ -6,34 +6,53 @@ import pandas as pd
 import io
 import uuid
 import base64
+from PIL import Image
 
 # ==========================================
-# 內部輔助函數 (文字、圖片與標籤清洗)
+# 內部輔助函數 (文字、圖片壓縮與標籤清洗)
 # ==========================================
+def compress_image_blob(blob):
+    """🌟 智慧圖片壓縮引擎：自動縮圖並轉為高壓縮 JPEG"""
+    try:
+        img = Image.open(io.BytesIO(blob))
+        # 統一轉換為 RGB 格式 (去除透明背景以利轉存 JPEG)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        
+        # 限制圖片最大尺寸 (800x800)，保持比例不變形
+        img.thumbnail((800, 800), Image.Resampling.LANCZOS)
+        
+        # 輸出壓縮後的 JPEG
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=75) # 品質 75 是容量與畫質的最佳平衡
+        return out.getvalue(), "image/jpeg"
+    except Exception as e:
+        # 萬一遇到無法解析的特殊圖片格式，就退回使用原始檔案
+        return blob, None
+
 def get_para_text_with_images(para, image_db):
-    """提取文字並將圖片變為 [IMG_xxx] 安全代碼"""
+    """提取文字並進行圖片壓縮轉換"""
     full_text = para.text  
     img_placeholders = ""
     for run in para.runs:
         try:
+            # 抓取新版與舊版圖片標籤
             blips = run._element.xpath('.//*[local-name()="blip"]')
-            for blip in blips:
-                rId = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
-                if rId:
-                    part = para.part.related_parts[rId]
-                    b64 = base64.b64encode(part.blob).decode('utf-8')
-                    img_id = f"IMG_{uuid.uuid4().hex[:8]}"
-                    image_db[img_id] = f"[IMAGE_BASE64:data:{part.content_type};base64,{b64}]"
-                    img_placeholders += f"\n[{img_id}]\n"
-            
             imagedatas = run._element.xpath('.//*[local-name()="imagedata"]')
-            for md in imagedatas:
-                rId = md.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
+            
+            for element in blips + imagedatas:
+                rId = element.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed') or \
+                      element.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
                 if rId:
                     part = para.part.related_parts[rId]
-                    b64 = base64.b64encode(part.blob).decode('utf-8')
+                    
+                    # 🌟 呼叫壓縮引擎！
+                    compressed_blob, mime_type = compress_image_blob(part.blob)
+                    final_mime = mime_type if mime_type else part.content_type
+                    
+                    b64 = base64.b64encode(compressed_blob).decode('utf-8')
                     img_id = f"IMG_{uuid.uuid4().hex[:8]}"
-                    image_db[img_id] = f"[IMAGE_BASE64:data:{part.content_type};base64,{b64}]"
+                    image_db[img_id] = f"[IMAGE_BASE64:data:{final_mime};base64,{b64}]"
                     img_placeholders += f"\n[{img_id}]\n"
         except:
             pass
@@ -125,15 +144,15 @@ def finalize_question(q_dict, topic_mapping):
 # ==========================================
 st.set_page_config(page_title="國考題庫轉檔與協作系統", page_icon="⚙️", layout="wide")
 
-st.title("⚙️ 國考題庫轉檔系統 (V16)")
-st.write("已解鎖 Word 隱形表格讀取能力！即使解析藏在表格中也能 100% 完美萃取。")
+st.title("⚙️ 國考題庫轉檔系統 (V17 圖片極限瘦身版)")
+st.write("內建智慧圖片壓縮引擎！大幅縮小 JSON 檔案容量，同時完美保留穿透表格提取解析的能力。")
 
 tab1, tab2, tab3 = st.tabs(["🚀 一鍵產出 JSON (推薦)", "📝 階段一：轉為 Excel 供校對", "💾 階段二：Excel 打包 JSON"])
 
 default_mapping = {
     "過敏反應": ["IgE", "過敏", "氣喘", "hypersensitivity"],
     "腫瘤免疫": ["腫瘤", "癌症", "tumor", "cancer", "TSA", "TAA"],
-    "自體免疫": ["自體免疫", "紅斑性狼瘡", "風濕", "SLE", "RA"],
+    "自體性免疫": ["自體免疫", "紅斑性狼瘡", "風濕", "SLE", "RA"],
     "移植免疫": ["移植", "排斥", "GVHD", "MHC", "HLA"],
     "先天性免疫": ["先天免疫", "巨噬細胞", "補體", "complement", "NK cell", "發炎"],
     "細胞性免疫": ["T細胞", "CD4", "CD8", "T cell", "細胞毒殺"],
@@ -145,7 +164,6 @@ def parse_word_document(uploaded_file, topic_mapping):
     image_db = {}
     all_lines = []
     
-    # 🌟 V16 核心：依序讀取所有段落與表格！
     for block in doc.element.body.iterchildren():
         if block.tag.endswith('p'):
             para = docx.text.paragraph.Paragraph(block, doc)
@@ -236,20 +254,23 @@ def parse_word_document(uploaded_file, topic_mapping):
 # Tab 1: 直接產出 JSON 
 # ==========================================
 with tab1:
-    st.info("直接將 Word 轉換為系統可讀的 JSON。內建表格穿透能力，保證解析絕不漏失！")
+    st.info("直接將 Word 轉換為系統可讀的 JSON。內建圖片自動壓縮技術，產出的 JSON 小巧輕便！")
     mapping_str_1 = st.text_area("關鍵字分類字典：", value=json.dumps(default_mapping, ensure_ascii=False, indent=4), height=150, key="map1")
     try: topic_mapping_1 = json.loads(mapping_str_1)
     except: topic_mapping_1 = default_mapping
     
     uploaded_word_1 = st.file_uploader("上傳 Word 題庫 (.docx)", type=["docx"], key="w1")
     if uploaded_word_1 and st.button("🚀 產出最終 JSON 題庫", type="primary", use_container_width=True):
-        with st.spinner("正在啟動表格穿透掃描與圖片萃取..."):
+        with st.spinner("正在啟動表格穿透與圖片壓縮掃描... (含有大量圖片時可能需數十秒，請稍候)"):
             qs, img_db = parse_word_document(uploaded_word_1, topic_mapping_1)
             if qs:
                 replace_images_in_dict(qs, img_db)
-                st.success(f"成功解析 {len(qs)} 題！共抽取了 {len(img_db)} 張圖片。")
+                st.success(f"成功解析 {len(qs)} 題！共抽取並壓縮了 {len(img_db)} 張圖片。")
+                
+                # 極限壓縮 JSON 文字格式
                 json_str = json.dumps(qs, ensure_ascii=False, separators=(',', ':'))
-                st.download_button("💾 下載 JSON 上線檔", data=json_str, file_name=uploaded_word_1.name.replace(".docx", "_穿透表格完美版.json"), mime="application/json", type="primary", use_container_width=True)
+                
+                st.download_button("💾 下載 JSON 上線檔", data=json_str, file_name=uploaded_word_1.name.replace(".docx", "_極限瘦身版.json"), mime="application/json", type="primary", use_container_width=True)
 
 # ==========================================
 # Tab 2 & 3: Excel 協作流程
@@ -262,7 +283,7 @@ with tab2:
     
     uploaded_word_2 = st.file_uploader("上傳 Word 題庫 (.docx)", type=["docx"], key="w2")
     if uploaded_word_2 and st.button("🚀 產出待校對 Excel 與圖片暫存檔", type="primary", use_container_width=True):
-        with st.spinner("正在產生 Excel..."):
+        with st.spinner("正在產生 Excel 並壓縮暫存圖片..."):
             qs, img_db = parse_word_document(uploaded_word_2, topic_mapping_2)
             if qs:
                 excel_rows = []
@@ -295,7 +316,9 @@ with tab2:
 
                 st.success(f"成功解析 {len(qs)} 題！")
                 st.download_button("📊 1. 下載待校對 Excel 檔", data=output.getvalue(), file_name=uploaded_word_2.name.replace(".docx", "_校對用.xlsx"), mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-                img_json = json.dumps(img_db, ensure_ascii=False)
+                
+                # 圖片庫也使用極致壓縮
+                img_json = json.dumps(img_db, ensure_ascii=False, separators=(',', ':'))
                 st.download_button("🖼️ 2. 下載圖片暫存檔 (image_db.json)", data=img_json, file_name="image_db.json", mime="application/json", use_container_width=True)
 
 with tab3:
