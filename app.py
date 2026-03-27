@@ -5,6 +5,7 @@ import re
 import pandas as pd
 import io
 import uuid
+import base64
 import zipfile
 from PIL import Image
 
@@ -40,7 +41,7 @@ def get_para_text_with_images(para, image_db):
                     part = para.part.related_parts[rId]
                     compressed_blob = compress_image_blob(part.blob)
                     
-                    # 🌟 改為實體檔案命名法
+                    # 使用實體檔案命名法
                     img_filename = f"IMG_{uuid.uuid4().hex[:8]}.jpg"
                     image_db[img_filename] = compressed_blob
                     img_placeholders += f"\n[IMG: {img_filename}]\n"
@@ -130,14 +131,16 @@ def create_zip_package(json_data, image_db, filename_prefix):
 # ==========================================
 # 網頁介面開始
 # ==========================================
-st.set_page_config(page_title="國考題庫轉檔系統", page_icon="⚙️", layout="wide")
-st.title("⚙️ 國考題庫轉檔系統 (V18 圖文分離版)")
-st.write("徹底解決系統 503 當機問題！產出的 ZIP 檔內含極輕量化 JSON 與獨立圖片資料夾。")
+st.set_page_config(page_title="國考題庫轉檔與協作系統", page_icon="⚙️", layout="wide")
+st.title("⚙️ 國考題庫轉檔系統 (V19 完全體：校對與圖文分離版)")
+st.write("已完美回歸 Excel 校對流程！最終輸出 ZIP 題庫包，徹底解決 NAS 503 當機問題。")
+
+tab1, tab2, tab3 = st.tabs(["🚀 一鍵產出 ZIP 題庫包", "📝 階段一：轉為 Excel 供校對", "💾 階段二：Excel 打包 ZIP 題庫包"])
 
 default_mapping = {
     "過敏反應": ["IgE", "過敏", "氣喘"],
     "腫瘤免疫": ["腫瘤", "癌症", "tumor"],
-    "自體免疫": ["自體免疫", "紅斑性狼瘡", "風濕", "SLE"],
+    "自體性免疫": ["自體免疫", "紅斑性狼瘡", "風濕", "SLE"],
     "移植免疫": ["移植", "排斥", "GVHD", "MHC"],
     "先天性免疫": ["先天免疫", "巨噬細胞", "補體"],
     "細胞性免疫": ["T細胞", "CD4", "CD8", "T cell"],
@@ -149,6 +152,7 @@ def parse_word_document(uploaded_file, topic_mapping):
     image_db = {}
     all_lines = []
     
+    # 穿透表格掃描
     for block in doc.element.body.iterchildren():
         if block.tag.endswith('p'):
             para = docx.text.paragraph.Paragraph(block, doc)
@@ -202,16 +206,10 @@ def parse_word_document(uploaded_file, topic_mapping):
             if current_q:
                 finalize_question(current_q, topic_mapping)
                 questions.append(current_q)
-            
             read_mode = "raw"
             ans = q_match.group('ans').strip().upper().replace('，', ',')
             q_num = int(q_match.group('num')) if q_match.group('num').isdigit() else 0
-            
-            current_q = {
-                "question_number": q_num, "answer": ans, "explanation": "", 
-                "tags": {"年份": current_year, "主題": current_topic}, 
-                "_raw_text": q_match.group('text').strip()
-            }
+            current_q = {"question_number": q_num, "answer": ans, "explanation": "", "tags": {"年份": current_year, "主題": current_topic}, "_raw_text": q_match.group('text').strip()}
             continue
             
         exp_match = exp_pattern.match(text)
@@ -235,24 +233,112 @@ def parse_word_document(uploaded_file, topic_mapping):
         
     return questions, image_db
 
-mapping_str_1 = st.text_area("關鍵字分類字典：", value=json.dumps(default_mapping, ensure_ascii=False, indent=4), height=150)
-try: topic_mapping_1 = json.loads(mapping_str_1)
-except: topic_mapping_1 = default_mapping
+# ==========================================
+# Tab 1: 直接產出 ZIP
+# ==========================================
+with tab1:
+    st.info("直接將 Word 轉換為最終 ZIP 題庫包。內含極輕量化 JSON 與獨立圖片資料夾。")
+    mapping_str_1 = st.text_area("關鍵字分類字典：", value=json.dumps(default_mapping, ensure_ascii=False, indent=4), height=150, key="map1")
+    try: topic_mapping_1 = json.loads(mapping_str_1)
+    except: topic_mapping_1 = default_mapping
+    
+    uploaded_word_1 = st.file_uploader("上傳 Word 題庫 (.docx)", type=["docx"], key="w1")
+    if uploaded_word_1 and st.button("🚀 產出 ZIP 題庫包", type="primary", use_container_width=True):
+        with st.spinner("正在執行圖文分離與打包作業..."):
+            qs, img_db = parse_word_document(uploaded_word_1, topic_mapping_1)
+            if qs:
+                prefix = uploaded_word_1.name.replace(".docx", "")
+                zip_bytes = create_zip_package(qs, img_db, prefix)
+                st.success(f"成功解析 {len(qs)} 題！共抽取 {len(img_db)} 張圖片，已完美分離打包！")
+                st.download_button("📦 下載 ZIP 題庫包", data=zip_bytes, file_name=f"{prefix}_題庫包.zip", mime="application/zip", type="primary", use_container_width=True)
 
-uploaded_word_1 = st.file_uploader("上傳 Word 題庫 (.docx)", type=["docx"])
-if uploaded_word_1 and st.button("🚀 產出 ZIP 題庫包", type="primary", use_container_width=True):
-    with st.spinner("正在執行圖文分離與打包作業..."):
-        qs, img_db = parse_word_document(uploaded_word_1, topic_mapping_1)
-        if qs:
-            prefix = uploaded_word_1.name.replace(".docx", "")
-            zip_bytes = create_zip_package(qs, img_db, prefix)
-            
-            st.success(f"成功解析 {len(qs)} 題！共抽取 {len(img_db)} 張圖片，已完美分離打包！")
-            st.download_button(
-                label="📦 下載 ZIP 題庫包 (含 JSON 與獨立 images 資料夾)", 
-                data=zip_bytes, 
-                file_name=f"{prefix}_題庫包.zip", 
-                mime="application/zip", 
-                type="primary", 
-                use_container_width=True
-            )
+# ==========================================
+# Tab 2: Word 轉 Excel 供校對
+# ==========================================
+with tab2:
+    st.info("讓老師用 Excel 校對分類。⚠️ 系統會為您保留圖片暫存檔，請一併下載以便後續還原！")
+    mapping_str_2 = st.text_area("關鍵字分類字典：", value=json.dumps(default_mapping, ensure_ascii=False, indent=4), height=150, key="map2")
+    try: topic_mapping_2 = json.loads(mapping_str_2)
+    except: topic_mapping_2 = default_mapping
+    
+    uploaded_word_2 = st.file_uploader("上傳 Word 題庫 (.docx)", type=["docx"], key="w2")
+    if uploaded_word_2 and st.button("🚀 產出待校對 Excel 與圖片暫存檔", type="primary", use_container_width=True):
+        with st.spinner("正在產生 Excel 並暫存壓縮圖片..."):
+            qs, img_db = parse_word_document(uploaded_word_2, topic_mapping_2)
+            if qs:
+                excel_rows = []
+                for q in qs:
+                    opts = q.get("options", {})
+                    excel_rows.append({
+                        "年份": q["tags"].get("年份", ""),
+                        "題號": q.get("question_number", ""),
+                        "主題 (下拉選單)": q["tags"].get("主題", ""),
+                        "題目": q.get("question_text", ""),
+                        "選項A": opts.get("A", ""), "選項B": opts.get("B", ""),
+                        "選項C": opts.get("C", ""), "選項D": opts.get("D", ""),
+                        "正確答案": q.get("answer", ""), "解析": q.get("explanation", "")
+                    })
+                df = pd.DataFrame(excel_rows)
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    df.to_excel(writer, index=False, sheet_name='待校對題庫')
+                    workbook = writer.book
+                    worksheet = writer.sheets['待校對題庫']
+                    worksheet.set_column('A:B', 8); worksheet.set_column('C:C', 20); worksheet.set_column('D:D', 45)
+                    worksheet.set_column('E:H', 22); worksheet.set_column('I:I', 10); worksheet.set_column('J:J', 50)
+                    
+                    topic_sheet = workbook.add_worksheet('主題清單(可擴充)')
+                    topic_sheet.write('A1', '🔽 系統預設主題 (往下新增將自動同步)')
+                    topic_sheet.set_column('A:A', 50)
+                    for i, t in enumerate(["未分類"] + list(topic_mapping_2.keys())):
+                        topic_sheet.write(i + 1, 0, t)
+                    worksheet.data_validation('C2:C10000', {'validate': 'list', 'source': "='主題清單(可擴充)'!$A$2:$A$200", 'error_type': 'warning'})
+
+                st.success(f"成功解析 {len(qs)} 題！")
+                st.download_button("📊 1. 下載待校對 Excel 檔", data=output.getvalue(), file_name=uploaded_word_2.name.replace(".docx", "_校對用.xlsx"), mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+                
+                # 圖片庫 Base64 編碼暫存 (僅供這一步過渡使用，最終會變回實體圖片)
+                img_db_b64 = {k: base64.b64encode(v).decode('utf-8') for k, v in img_db.items()}
+                img_json = json.dumps(img_db_b64, ensure_ascii=False)
+                st.download_button("🖼️ 2. 下載圖片暫存檔 (image_db.json)", data=img_json, file_name="image_db.json", mime="application/json", use_container_width=True)
+
+# ==========================================
+# Tab 3: Excel 打包 ZIP
+# ==========================================
+with tab3:
+    st.info("上傳校對好的 Excel 與圖片暫存檔，系統會將兩者合併，打包成最終上線用的 ZIP 題庫包！")
+    uploaded_excel = st.file_uploader("1. 上傳校對完的 Excel (.xlsx)", type=["xlsx"])
+    uploaded_img_db = st.file_uploader("2. 上傳圖片暫存檔 (image_db.json) (若本題無圖片可略過)", type=["json"])
+
+    if uploaded_excel and st.button("💾 封裝為最終 ZIP 題庫包", type="primary", use_container_width=True):
+        with st.spinner("正在讀取 Excel 並打包實體圖片..."):
+            try:
+                # 讀取並還原圖片暫存檔
+                img_db = {}
+                if uploaded_img_db:
+                    img_db_b64 = json.load(uploaded_img_db)
+                    img_db = {k: base64.b64decode(v) for k, v in img_db_b64.items()}
+                
+                df = pd.read_excel(uploaded_excel, sheet_name='待校對題庫').fillna("")
+                final_questions = []
+                for idx, row in df.iterrows():
+                    if str(row.get("題目", "")).strip() == "": continue
+                    opts = {k: str(row.get(f"選項{k}", "")).strip() for k in ['A', 'B', 'C', 'D'] if str(row.get(f"選項{k}", "")).strip()}
+                    q_num = str(row.get("題號", "0")).strip()
+                    q_num = int(float(q_num)) if q_num.replace('.', '', 1).isdigit() else 0
+                    
+                    q = {
+                        "question_number": q_num, "answer": str(row.get("正確答案", "")).strip(),
+                        "explanation": str(row.get("解析", "")).strip(),
+                        "tags": {"年份": str(row.get("年份", "")).strip(), "主題": str(row.get("主題 (下拉選單)", "")).strip()},
+                        "question_text": str(row.get("題目", "")).strip(), "options": opts
+                    }
+                    final_questions.append(q)
+                    
+                if final_questions:
+                    prefix = uploaded_excel.name.replace(".xlsx", "")
+                    zip_bytes = create_zip_package(final_questions, img_db, prefix)
+                    st.success(f"🎉 封裝成功！共匯入 {len(final_questions)} 題，並打包了 {len(img_db)} 張圖片！")
+                    st.download_button("📦 下載 ZIP 題庫包", data=zip_bytes, file_name=f"{prefix}_最終題庫包.zip", mime="application/zip", type="primary", use_container_width=True)
+            except Exception as e:
+                st.error(f"錯誤：{e}")
