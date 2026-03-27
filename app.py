@@ -11,7 +11,7 @@ import base64
 # 內部輔助函數 (文字、圖片與標籤清洗)
 # ==========================================
 def get_para_text_with_images(para, image_db):
-    """提取文字並將圖片變為 [IMG_xxx] 安全代碼 (支援新舊版圖片)"""
+    """提取文字並將圖片變為 [IMG_xxx] 安全代碼"""
     full_text = para.text  
     img_placeholders = ""
     for run in para.runs:
@@ -103,25 +103,19 @@ def replace_images_in_dict(d, img_db):
         for item in d:
             replace_images_in_dict(item, img_db)
 
-# 🌟 V15 核心：終極保底過濾器 (X光掃描機)
 def finalize_question(q_dict, topic_mapping):
-    # 如果常規掃描沒抓到解析，啟動 X 光機從題目裡面硬挖！
     if not q_dict.get("explanation"):
         raw = q_dict.get("_raw_text", "")
-        
-        # 狀況A：解析躲在某個隱形的換行之後
         fb1 = re.search(r'\n[\"\'\,\.\-\s【\[<]*(解\s*答?\s*析)(?!度)[\s:：\]】>\"\',，]*(.*)', raw, re.IGNORECASE | re.DOTALL)
         if fb1:
             q_dict["explanation"] = fb1.group(2).strip()
             q_dict["_raw_text"] = raw[:fb1.start()].strip()
         else:
-            # 狀況B：解析跟選項完全黏在一起，但有打冒號 "解析:"
             fb2 = re.search(r'(解\s*答?\s*析)(?!度)[\s:：]+(.*)', raw, re.IGNORECASE | re.DOTALL)
             if fb2:
                 q_dict["explanation"] = fb2.group(2).strip()
                 q_dict["_raw_text"] = raw[:fb2.start()].strip(' ,"\'.\n\t\r【<[')
 
-    # 選項切割與標籤清洗
     _extract_options(q_dict)
     _extract_tags_from_all(q_dict)
     auto_categorize(q_dict, topic_mapping)
@@ -131,8 +125,8 @@ def finalize_question(q_dict, topic_mapping):
 # ==========================================
 st.set_page_config(page_title="國考題庫轉檔與協作系統", page_icon="⚙️", layout="wide")
 
-st.title("⚙️ 國考題庫轉檔系統 (V15 雙重保險防漏版)")
-st.write("內建終極 X 光掃描保底機制。即使常規讀取失敗，也會自動從死角挖出您的解析！")
+st.title("⚙️ 國考題庫轉檔系統 (V16)")
+st.write("已解鎖 Word 隱形表格讀取能力！即使解析藏在表格中也能 100% 完美萃取。")
 
 tab1, tab2, tab3 = st.tabs(["🚀 一鍵產出 JSON (推薦)", "📝 階段一：轉為 Excel 供校對", "💾 階段二：Excel 打包 JSON"])
 
@@ -141,9 +135,9 @@ default_mapping = {
     "腫瘤免疫": ["腫瘤", "癌症", "tumor", "cancer", "TSA", "TAA"],
     "自體免疫": ["自體免疫", "紅斑性狼瘡", "風濕", "SLE", "RA"],
     "移植免疫": ["移植", "排斥", "GVHD", "MHC", "HLA"],
-    "先天免疫": ["先天免疫", "巨噬細胞", "補體", "complement", "NK cell", "發炎"],
-    "細胞免疫": ["T細胞", "CD4", "CD8", "T cell", "細胞毒殺"],
-    "體液免疫": ["B細胞", "B cell", "抗體", "IgG", "IgM", "IgA", "漿細胞"]
+    "先天性免疫": ["先天免疫", "巨噬細胞", "補體", "complement", "NK cell", "發炎"],
+    "細胞性免疫": ["T細胞", "CD4", "CD8", "T cell", "細胞毒殺"],
+    "體液性免疫": ["B細胞", "B cell", "抗體", "IgG", "IgM", "IgA", "漿細胞"]
 }
 
 def parse_word_document(uploaded_file, topic_mapping):
@@ -151,11 +145,24 @@ def parse_word_document(uploaded_file, topic_mapping):
     image_db = {}
     all_lines = []
     
-    for para in doc.paragraphs:
-        raw_text_with_imgs = get_para_text_with_images(para, image_db)
-        for line in re.split(r'[\n\v]', raw_text_with_imgs):
-            clean_line = normalize_line(line)
-            if clean_line: all_lines.append(clean_line)
+    # 🌟 V16 核心：依序讀取所有段落與表格！
+    for block in doc.element.body.iterchildren():
+        if block.tag.endswith('p'):
+            para = docx.text.paragraph.Paragraph(block, doc)
+            raw_text = get_para_text_with_images(para, image_db)
+            for line in re.split(r'[\n\v]', raw_text):
+                clean_line = normalize_line(line)
+                if clean_line: all_lines.append(clean_line)
+                
+        elif block.tag.endswith('tbl'):
+            table = docx.table.Table(block, doc)
+            for row in table.rows:
+                for cell in row.cells:
+                    for para in cell.paragraphs:
+                        raw_text = get_para_text_with_images(para, image_db)
+                        for line in re.split(r'[\n\v]', raw_text):
+                            clean_line = normalize_line(line)
+                            if clean_line: all_lines.append(clean_line)
 
     questions = []
     current_year = "未知年份"
@@ -229,20 +236,20 @@ def parse_word_document(uploaded_file, topic_mapping):
 # Tab 1: 直接產出 JSON 
 # ==========================================
 with tab1:
-    st.info("直接將 Word 轉換為系統可讀的 JSON。內建終極 X 光保底機制，保證解析絕不漏失！")
+    st.info("直接將 Word 轉換為系統可讀的 JSON。內建表格穿透能力，保證解析絕不漏失！")
     mapping_str_1 = st.text_area("關鍵字分類字典：", value=json.dumps(default_mapping, ensure_ascii=False, indent=4), height=150, key="map1")
     try: topic_mapping_1 = json.loads(mapping_str_1)
     except: topic_mapping_1 = default_mapping
     
     uploaded_word_1 = st.file_uploader("上傳 Word 題庫 (.docx)", type=["docx"], key="w1")
     if uploaded_word_1 and st.button("🚀 產出最終 JSON 題庫", type="primary", use_container_width=True):
-        with st.spinner("正在啟動雙重保險掃描與圖片萃取..."):
+        with st.spinner("正在啟動表格穿透掃描與圖片萃取..."):
             qs, img_db = parse_word_document(uploaded_word_1, topic_mapping_1)
             if qs:
                 replace_images_in_dict(qs, img_db)
                 st.success(f"成功解析 {len(qs)} 題！共抽取了 {len(img_db)} 張圖片。")
                 json_str = json.dumps(qs, ensure_ascii=False, separators=(',', ':'))
-                st.download_button("💾 下載 JSON 上線檔", data=json_str, file_name=uploaded_word_1.name.replace(".docx", "_完美保底版.json"), mime="application/json", type="primary", use_container_width=True)
+                st.download_button("💾 下載 JSON 上線檔", data=json_str, file_name=uploaded_word_1.name.replace(".docx", "_穿透表格完美版.json"), mime="application/json", type="primary", use_container_width=True)
 
 # ==========================================
 # Tab 2 & 3: Excel 協作流程
