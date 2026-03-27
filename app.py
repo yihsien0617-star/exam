@@ -16,7 +16,6 @@ def get_para_text_with_images(para, image_db):
     for run in para.runs:
         text += run.text
         try:
-            # 深入 XML 結構抓取圖片
             blips = run._element.xpath('.//*[local-name()="blip"]')
             for blip in blips:
                 rId = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
@@ -24,9 +23,7 @@ def get_para_text_with_images(para, image_db):
                     part = para.part.related_parts[rId]
                     b64 = base64.b64encode(part.blob).decode('utf-8')
                     img_id = f"IMG_{uuid.uuid4().hex[:8]}"
-                    # 存入暫存字典
                     image_db[img_id] = f"[IMAGE_BASE64:data:{part.content_type};base64,{b64}]"
-                    # 在文字中留下安全佔位符
                     text += f"[{img_id}]"
         except:
             pass
@@ -39,24 +36,28 @@ def normalize_line(text):
     return text.strip()
 
 def extract_and_remove_tags(text, q_dict):
+    """🌟 修復版標籤清洗器：只抓特定關鍵字，絕不誤吃解析！"""
     if not text: return text
-    pattern_quoted = r'[\"\'”’]\s*([^\"\'”’]+?)\s*[:]\s*([^\"\'”’]+?)\s*[\"\'”’]'
-    for m in re.finditer(pattern_quoted, text):
-        raw_key = m.group(1).replace(" ", "")
-        raw_val = m.group(2).strip()
-        clean_val = re.sub(r'\(.*?\)|（.*?）', '', raw_val).strip()
-        q_dict["tags"][raw_key] = clean_val
-    text = re.sub(pattern_quoted, '', text).strip()
     
     keywords = ["難度", "再現性", "主題", "分類", "單元", "章節"]
     for kw in keywords:
         kw_regex = kw[0] + r'\s*' + kw[1:] if len(kw) >= 2 else kw
-        pattern_plain = r'(?:^|[\n\s,，])(' + kw_regex + r')\s*[:]\s*([^,，\n]+)'
-        for m in re.finditer(pattern_plain, text):
-            q_dict["tags"][kw] = re.sub(r'\(.*?\)|（.*?）', '', m.group(2)).strip()
+        # 只精準鎖定這些關鍵字，無視其他帶有冒號的句子
+        pattern = r'[\"\'”’]?\s*(' + kw_regex + r')\s*[:]\s*([^\"\'”’\n]+)[\"\'”’]?'
+        
+        for m in re.finditer(pattern, text):
+            val = m.group(2).strip()
+            # 洗掉 (非常簡單) 等括號內的雜訊
+            val = re.sub(r'\(.*?\)|（.*?）', '', val).strip()
+            val = val.rstrip(',，').strip()
+            q_dict["tags"][kw] = val
             text = text.replace(m.group(0), '')
             
-    return re.sub(r'^[,\"\'\s，]+|[,\"\'\s，]+$', '', text).strip()
+    # 清理開頭結尾的殘留逗號與引號
+    text = re.sub(r'^[,\"\'\s，]+|[,\"\'\s，]+$', '', text)
+    # 清除多餘的空白逗號
+    text = re.sub(r',\s*,', ',', text)
+    return text.strip()
 
 def _extract_tags_from_all(q_dict):
     q_dict["explanation"] = extract_and_remove_tags(q_dict.get("explanation", ""), q_dict)
@@ -92,7 +93,6 @@ def auto_categorize(q_dict, mapping):
                 return 
 
 def replace_images_in_dict(d, img_db):
-    """🌟 遞迴還原圖片：將 [IMG_123] 替換回龐大的 Base64 實體圖片"""
     if isinstance(d, dict):
         for k, v in d.items():
             if isinstance(v, str):
@@ -110,12 +110,11 @@ def replace_images_in_dict(d, img_db):
 # ==========================================
 st.set_page_config(page_title="國考題庫轉檔與協作系統", page_icon="⚙️", layout="wide")
 
-st.title("⚙️ 國考題庫轉檔系統 (V9 多媒體修復版)")
-st.write("完美支援 Word 圖片與密集排版。可一鍵產出直接上線的 JSON，或產出 Excel 供老師校對。")
+st.title("⚙️ 國考題庫轉檔系統 (V10 穩定復刻版)")
+st.write("已修復解析被吞噬的 Bug，還原最穩定的分割機制，並支援原生圖片萃取。")
 
 tab1, tab2, tab3 = st.tabs(["🚀 一鍵產出 JSON (推薦)", "📝 階段一：轉為 Excel 供校對", "💾 階段二：Excel 打包 JSON"])
 
-# 預設分類字典
 default_mapping = {
     "過敏反應": ["IgE", "過敏", "氣喘", "hypersensitivity"],
     "腫瘤免疫": ["腫瘤", "癌症", "tumor", "cancer", "TSA", "TAA"],
@@ -126,16 +125,15 @@ default_mapping = {
     "體液免疫": ["B細胞", "B cell", "抗體", "IgG", "IgM", "IgA", "漿細胞"]
 }
 
-# --- 共用解析引擎 ---
 def parse_word_document(uploaded_file, topic_mapping):
     doc = docx.Document(uploaded_file)
     image_db = {}
     all_lines = []
     
-    # 強制斷行掃描，並同時抓取圖片
     for para in doc.paragraphs:
         raw_text_with_imgs = get_para_text_with_images(para, image_db)
-        for line in raw_text_with_imgs.split('\n'):
+        # 兼容各種隱形的軟換行符號
+        for line in re.split(r'[\n\v]', raw_text_with_imgs):
             clean_line = normalize_line(line)
             if clean_line: all_lines.append(clean_line)
 
@@ -147,8 +145,8 @@ def parse_word_document(uploaded_file, topic_mapping):
     year_pattern = re.compile(r'(\d{2,4})\s*年')
     q_start_pattern = re.compile(r'^.*?[\(]\s*(?P<ans>[A-Ea-e,皆全對送分]+)\s*[\)]\s*(?P<num>\d+)\s*[.、\s]\s*(?P<text>.*)')
     topic_pattern = re.compile(r'^(?:【([^】]+)】|(?:\w{2}[:：]\s*)(.+))$')
-    # 強化解析切割判定，必須有冒號
-    exp_pattern = re.compile(r'^[\"\'\,\.\-\s]*解\s*答?\s*析\s*[:：\s](.*)', re.IGNORECASE)
+    # 回歸最初最穩定的解析尋找法
+    exp_pattern = re.compile(r'^[\"\'\,\.\-\s]*解\s*答?\s*析\s*[:](.*)', re.IGNORECASE)
 
     for text in all_lines:
         t_match = topic_pattern.match(text)
@@ -182,10 +180,13 @@ def parse_word_document(uploaded_file, topic_mapping):
             continue
             
         if current_q:
-            hidden_exp_match = re.search(r'[\"\'\,\.\-\s]*解\s*答?\s*析\s*[:：]', text, re.IGNORECASE)
+            hidden_exp_match = re.search(r'([\"\'\,\.\-\s]*)(解\s*答?\s*析\s*[:])', text, re.IGNORECASE)
             if hidden_exp_match:
-                current_q["_raw_text"] += "\n" + text[:hidden_exp_match.start()].strip()
-                current_q["explanation"] += text[hidden_exp_match.end():].strip()
+                # 確保題目的文字被正確切開保留
+                q_part = text[:hidden_exp_match.start(1)].strip()
+                if q_part:
+                    current_q["_raw_text"] += "\n" + q_part
+                current_q["explanation"] += text[hidden_exp_match.end(2):].strip()
                 continue
 
             if current_q["explanation"]: current_q["explanation"] += "\n" + text
@@ -197,10 +198,10 @@ def parse_word_document(uploaded_file, topic_mapping):
     return questions, image_db
 
 # ==========================================
-# Tab 1: 直接產出 JSON (最快、最完整)
+# Tab 1: 直接產出 JSON 
 # ==========================================
 with tab1:
-    st.info("直接將 Word 轉換為系統可讀的 JSON，保證圖片與解析 100% 完整呈現！")
+    st.info("直接將 Word 轉換為系統可讀的 JSON，解析與分類將 100% 完整呈現！")
     mapping_str_1 = st.text_area("關鍵字分類字典：", value=json.dumps(default_mapping, ensure_ascii=False, indent=4), height=150, key="map1")
     try: topic_mapping_1 = json.loads(mapping_str_1)
     except: topic_mapping_1 = default_mapping
@@ -210,17 +211,16 @@ with tab1:
         with st.spinner("正在萃取圖片與解析..."):
             qs, img_db = parse_word_document(uploaded_word_1, topic_mapping_1)
             if qs:
-                # 把圖片還原回 JSON 內
                 replace_images_in_dict(qs, img_db)
                 st.success(f"成功解析 {len(qs)} 題！共抽取了 {len(img_db)} 張圖片。")
                 json_str = json.dumps(qs, ensure_ascii=False, separators=(',', ':'))
-                st.download_button("💾 下載 JSON 上線檔", data=json_str, file_name=uploaded_word_1.name.replace(".docx", "_完整版.json"), mime="application/json", type="primary", use_container_width=True)
+                st.download_button("💾 下載 JSON 上線檔", data=json_str, file_name=uploaded_word_1.name.replace(".docx", "_完整修復版.json"), mime="application/json", type="primary", use_container_width=True)
 
 # ==========================================
 # Tab 2: Word 轉 Excel
 # ==========================================
 with tab2:
-    st.info("讓老師用 Excel 校對分類。⚠️ 系統會將圖片替換為 [IMG_xxx] 標記以防 Excel 崩潰，請勿刪除，轉回 JSON 時會自動復原！")
+    st.info("讓老師用 Excel 校對分類。⚠️ 系統會將圖片暫時替換為 [IMG_xxx] 標記以防 Excel 崩潰，轉回 JSON 時會自動復原！")
     mapping_str_2 = st.text_area("關鍵字分類字典：", value=json.dumps(default_mapping, ensure_ascii=False, indent=4), height=150, key="map2")
     try: topic_mapping_2 = json.loads(mapping_str_2)
     except: topic_mapping_2 = default_mapping
@@ -256,23 +256,20 @@ with tab2:
                     topic_sheet.set_column('A:A', 50)
                     for i, t in enumerate(["未分類"] + list(topic_mapping_2.keys())):
                         topic_sheet.write(i + 1, 0, t)
-                        
                     worksheet.data_validation('C2:C10000', {'validate': 'list', 'source': "='主題清單(可擴充)'!$A$2:$A$200", 'error_type': 'warning'})
 
                 st.success(f"成功解析 {len(qs)} 題！")
                 st.download_button("📊 1. 下載待校對 Excel 檔", data=output.getvalue(), file_name=uploaded_word_2.name.replace(".docx", "_校對用.xlsx"), mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-                
-                # 輸出圖片暫存檔
                 img_json = json.dumps(img_db, ensure_ascii=False)
-                st.download_button("🖼️ 2. 下載圖片暫存檔 (下一步需使用)", data=img_json, file_name="image_db.json", mime="application/json", use_container_width=True)
+                st.download_button("🖼️ 2. 下載圖片暫存檔 (image_db.json)", data=img_json, file_name="image_db.json", mime="application/json", use_container_width=True)
 
 # ==========================================
 # Tab 3: Excel 轉 JSON
 # ==========================================
 with tab3:
-    st.info("上傳校對好的 Excel，並將剛剛的「圖片暫存檔」一併附上，系統會將圖片完美還原至題庫中！")
+    st.info("上傳校對好的 Excel，並附上圖片暫存檔，系統會將圖片與解析完美還原至題庫中！")
     uploaded_excel = st.file_uploader("1. 上傳校對完的 Excel (.xlsx)", type=["xlsx"])
-    uploaded_img_db = st.file_uploader("2. 上傳圖片暫存檔 (image_db.json) (若本題庫無圖片可略過)", type=["json"])
+    uploaded_img_db = st.file_uploader("2. 上傳圖片暫存檔 (image_db.json) (若本題無圖片可略過)", type=["json"])
 
     if uploaded_excel and st.button("💾 封裝為最終 JSON 題庫", type="primary", use_container_width=True):
         with st.spinner("正在封裝題庫並還原圖片..."):
