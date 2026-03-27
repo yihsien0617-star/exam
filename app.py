@@ -2,8 +2,10 @@ import streamlit as st
 import docx
 import json
 import re
+import pandas as pd
+import io
 
-# --- 內部輔助函數 ---
+# --- 內部輔助函數 (文字處理與清洗) ---
 def normalize_line(text):
     text = text.replace('（', '(').replace('）', ')')
     text = text.replace('：', ':')
@@ -55,196 +57,214 @@ def _extract_options(q_dict):
         q_dict["options"] = {}
 
 def auto_categorize(q_dict, mapping):
-    """🌟 智慧關鍵字分類引擎：掃描題目與解析，全自動歸類"""
-    # 如果已經有明確主題，就不覆蓋
-    if q_dict["tags"].get("主題", "未分類") != "未分類":
-        return
-        
-    # 將題目與解析合併作為搜尋範圍
-    search_text = q_dict.get("question_text", "") + " " + q_dict.get("explanation", "")
-    search_text = search_text.lower()
-    
+    if q_dict["tags"].get("主題", "未分類") != "未分類": return
+    search_text = (q_dict.get("question_text", "") + " " + q_dict.get("explanation", "")).lower()
     for topic, keywords in mapping.items():
         for kw in keywords:
             if kw.lower() in search_text:
                 q_dict["tags"]["主題"] = topic
-                return  # 匹配到第一個就結束
+                return 
 
 # --- 網頁介面開始 ---
-st.set_page_config(page_title="國考題庫全自動轉檔與分類系統", page_icon="⚙️", layout="wide")
+st.set_page_config(page_title="國考題庫轉檔與協作系統", page_icon="⚙️", layout="wide")
 
-st.title("⚙️ 國考題庫轉檔與自動分類系統 (V7 智慧版)")
-st.write("支援未來所有專業科目！只要在下方設定關鍵字，系統就會自動幫您閱讀題目並進行分類。")
+st.title("⚙️ 國考題庫轉檔與協作系統 (V8 雙引擎版)")
+st.write("這套系統為降低教師負擔而生。請先將 Word 轉為 Excel 供老師校對，確認無誤後再將 Excel 轉為最終題庫。")
 
-# --- 智慧分類字典設定區 ---
-st.subheader("🧠 第一步：設定自動分類關鍵字字典 (選填)")
-st.info("系統會掃描題目，若包含以下關鍵字，將自動套用對應的分類主題。您可以依照不同科目自由修改這份清單！")
+tab1, tab2 = st.tabs(["📝 階段一：Word 轉 Excel (AI 初步掃描)", "💾 階段二：Excel 轉 JSON (最終題庫產出)"])
 
-default_mapping = {
-    "過敏反應": ["IgE", "過敏", "氣喘", "第一型", "第二型", "第三型", "第四型", "hypersensitivity"],
-    "腫瘤免疫": ["腫瘤", "癌症", "tumor", "cancer", "TSA", "TAA", "carcinoma"],
-    "自體免疫": ["自體免疫", "紅斑性狼瘡", "風濕", "SLE", "RA", "autoimmune"],
-    "移植免疫": ["移植", "排斥", "GVHD", "MHC", "HLA", "graft"],
-    "先天免疫": ["先天免疫", "巨噬細胞", "補體", "complement", "NK cell", "發炎", "吞噬"],
-    "細胞免疫": ["T細胞", "CD4", "CD8", "T cell", "細胞毒殺"],
-    "體液免疫": ["B細胞", "B cell", "抗體", "IgG", "IgM", "IgA", "漿細胞"]
-}
+# ==========================================
+# 階段一：Word 轉 Excel
+# ==========================================
+with tab1:
+    st.subheader("🧠 第一步：設定初步分類字典 (選填)")
+    st.info("系統會盡力幫您初步分類。沒分好的部分，等一下匯出 Excel 後老師再手動改就好！")
+    
+    default_mapping = {
+        "過敏反應": ["IgE", "過敏", "氣喘", "hypersensitivity"],
+        "腫瘤免疫": ["腫瘤", "癌症", "tumor", "cancer", "TSA", "TAA"],
+        "自體免疫": ["自體免疫", "紅斑性狼瘡", "風濕", "SLE", "RA"],
+        "移植免疫": ["移植", "排斥", "GVHD", "MHC", "HLA"],
+        "先天免疫": ["先天免疫", "巨噬細胞", "補體", "complement", "NK cell", "發炎"],
+        "細胞免疫": ["T細胞", "CD4", "CD8", "T cell", "細胞毒殺"],
+        "體液免疫": ["B細胞", "B cell", "抗體", "IgG", "IgM", "IgA", "漿細胞"]
+    }
+    
+    mapping_str = st.text_area("請定義初步抓取的關鍵字：", value=json.dumps(default_mapping, ensure_ascii=False, indent=4), height=150)
+    try:
+        topic_mapping = json.loads(mapping_str)
+    except:
+        topic_mapping = default_mapping
 
-mapping_str = st.text_area(
-    "請以 JSON 格式編輯您的關鍵字字典：", 
-    value=json.dumps(default_mapping, ensure_ascii=False, indent=4),
-    height=250
-)
+    st.subheader("📂 第二步：上傳原始 Word 題庫檔")
+    uploaded_word = st.file_uploader("選擇 Word 檔案 (.docx)", type=["docx"], key="word_uploader")
 
-try:
-    topic_mapping = json.loads(mapping_str)
-except Exception as e:
-    st.error(f"⚠️ 字典格式錯誤，請確認標點符號是否為半形！將暫時使用預設字典。({e})")
-    topic_mapping = default_mapping
+    if uploaded_word is not None:
+        if st.button("🚀 產出 Excel 給老師校對", type="primary", use_container_width=True):
+            with st.spinner("正在掃描 Word 並產生 Excel 表格..."):
+                try:
+                    doc = docx.Document(uploaded_word)
+                    all_lines = []
+                    for para in doc.paragraphs:
+                        for line in para.text.split('\n'):
+                            clean_line = normalize_line(line)
+                            if clean_line: all_lines.append(clean_line)
 
-st.divider()
+                    questions = []
+                    current_year = "未知年份"
+                    current_topic = "未分類"
+                    current_q = None
 
-# --- 檔案上傳區 ---
-st.subheader("📂 第二步：上傳 Word 題庫檔 (.docx)")
-uploaded_file = st.file_uploader("請選擇準備好的 Word 檔案", type=["docx"])
+                    year_pattern = re.compile(r'(\d{2,4})\s*年')
+                    q_start_pattern = re.compile(r'^.*?[\(]\s*(?P<ans>[A-Ea-e,皆全對送分]+)\s*[\)]\s*(?P<num>\d+)\s*[.、\s]\s*(?P<text>.*)')
+                    topic_pattern = re.compile(r'^(?:【([^】]+)】|(?:\w{2}[:：]\s*)(.+))$')
 
-if uploaded_file is not None:
-    if st.button("🚀 開始全自動轉換與分類", type="primary", use_container_width=True):
-        with st.spinner("正在執行全域掃描與智慧分類..."):
-            try:
-                doc = docx.Document(uploaded_file)
-                all_lines = []
-                for para in doc.paragraphs:
-                    for line in para.text.split('\n'):
-                        clean_line = normalize_line(line)
-                        if clean_line:
-                            all_lines.append(clean_line)
-
-                questions = []
-                current_year = "未知年份"
-                current_topic = "未分類" # 這裡存放「章節繼承法」的標題
-                current_q = None
-                skipped_lines = []
-
-                year_pattern = re.compile(r'(\d{2,4})\s*年')
-                q_start_pattern = re.compile(r'^.*?[\(]\s*(?P<ans>[A-Ea-e,皆全對送分]+)\s*[\)]\s*(?P<num>\d+)\s*[.、\s]\s*(?P<text>.*)')
-                exp_pattern = re.compile(r'^[\"\'\,\.\-\s]*解\s*析\s*[:](.*)', re.IGNORECASE)
-                # 🌟 嚴謹的章節標題偵測 (支援: 【腫瘤免疫】 或 單元: 腫瘤免疫)
-                topic_pattern = re.compile(r'^(?:【([^】]+)】|(?:\w{2}[:：]\s*)(.+))$')
-
-                for text in all_lines:
-                    # 1. 偵測章節標題 (章節繼承法)
-                    t_match = topic_pattern.match(text)
-                    if t_match and not q_start_pattern.search(text):
-                        if current_q:
-                            _extract_options(current_q)
-                            _extract_tags_from_all(current_q)
-                            auto_categorize(current_q, topic_mapping) # 提交前進行智慧分類
-                            questions.append(current_q)
-                            current_q = None
-                        current_topic = t_match.group(1) or t_match.group(2)
-                        continue
-
-                    # 2. 偵測年份
-                    year_match = year_pattern.search(text)
-                    if year_match and not q_start_pattern.search(text): 
-                        if current_q:
-                            _extract_options(current_q)
-                            _extract_tags_from_all(current_q)
-                            auto_categorize(current_q, topic_mapping)
-                            questions.append(current_q)
-                            current_q = None
-                        current_year = text.replace('"', '').replace(',', '').strip()
-                        continue
-                        
-                    # 3. 抓題目
-                    q_match = q_start_pattern.match(text)
-                    if q_match:
-                        if current_q:
-                            _extract_options(current_q)
-                            _extract_tags_from_all(current_q)
-                            auto_categorize(current_q, topic_mapping)
-                            questions.append(current_q)
-                        
-                        ans = q_match.group('ans').strip().upper().replace('，', ',')
-                        try:
-                            q_num = int(q_match.group('num'))
-                        except:
-                            q_num = 0
-                            
-                        current_q = {
-                            "question_number": q_num,
-                            "answer": ans,
-                            "explanation": "",
-                            "tags": {
-                                "年份": current_year,
-                                "主題": current_topic # 優先套用上方偵測到的章節標題
-                            },
-                            "_raw_text": q_match.group('text').strip()
-                        }
-                        continue
-                        
-                    # 4. 抓解析
-                    exp_match = exp_pattern.match(text)
-                    if exp_match and current_q:
-                        current_q["explanation"] = exp_match.group(1).strip()
-                        continue
-                        
-                    # 5. 多行文字串接
-                    if current_q:
-                        hidden_exp_match = re.search(r'[\"\'\,\.\-\s]*解\s*析\s*[:]', text, re.IGNORECASE)
-                        if hidden_exp_match:
-                            split_idx = hidden_exp_match.start()
-                            if text[:split_idx].strip():
-                                current_q["_raw_text"] += "\n" + text[:split_idx].strip()
-                            current_q["explanation"] += text[hidden_exp_match.end():].strip()
+                    for text in all_lines:
+                        t_match = topic_pattern.match(text)
+                        if t_match and not q_start_pattern.search(text):
+                            if current_q:
+                                _extract_options(current_q); _extract_tags_from_all(current_q); auto_categorize(current_q, topic_mapping); questions.append(current_q)
+                                current_q = None
+                            current_topic = t_match.group(1) or t_match.group(2)
                             continue
 
-                        if current_q["explanation"]:
-                            current_q["explanation"] += "\n" + text
-                        else:
-                            current_q["_raw_text"] += "\n" + text
+                        year_match = year_pattern.search(text)
+                        if year_match and not q_start_pattern.search(text): 
+                            if current_q:
+                                _extract_options(current_q); _extract_tags_from_all(current_q); auto_categorize(current_q, topic_mapping); questions.append(current_q)
+                                current_q = None
+                            current_year = text.replace('"', '').replace(',', '').strip()
+                            continue
+                            
+                        q_match = q_start_pattern.match(text)
+                        if q_match:
+                            if current_q:
+                                _extract_options(current_q); _extract_tags_from_all(current_q); auto_categorize(current_q, topic_mapping); questions.append(current_q)
+                            ans = q_match.group('ans').strip().upper().replace('，', ',')
+                            q_num = int(q_match.group('num')) if q_match.group('num').isdigit() else 0
+                            current_q = {"question_number": q_num, "answer": ans, "explanation": "", "tags": {"年份": current_year, "主題": current_topic}, "_raw_text": q_match.group('text').strip()}
+                            continue
+                            
+                        if current_q:
+                            hidden_exp_match = re.search(r'[\"\'\,\.\-\s]*解\s*析\s*[:]', text, re.IGNORECASE)
+                            if hidden_exp_match:
+                                current_q["_raw_text"] += "\n" + text[:hidden_exp_match.start()].strip()
+                                current_q["explanation"] += text[hidden_exp_match.end():].strip()
+                                continue
+
+                            if current_q["explanation"]: current_q["explanation"] += "\n" + text
+                            else: current_q["_raw_text"] += "\n" + text
+
+                    if current_q:
+                        _extract_options(current_q); _extract_tags_from_all(current_q); auto_categorize(current_q, topic_mapping); questions.append(current_q)
+
+                    # --- 轉換為 Excel 格式 ---
+                    if questions:
+                        excel_rows = []
+                        for q in questions:
+                            opts = q.get("options", {})
+                            excel_rows.append({
+                                "年份": q["tags"].get("年份", ""),
+                                "題號": q.get("question_number", ""),
+                                "主題 (請在此修正)": q["tags"].get("主題", ""),
+                                "題目": q.get("question_text", ""),
+                                "選項A": opts.get("A", ""),
+                                "選項B": opts.get("B", ""),
+                                "選項C": opts.get("C", ""),
+                                "選項D": opts.get("D", ""),
+                                "正確答案": q.get("answer", ""),
+                                "解析": q.get("explanation", "")
+                            })
+                            
+                        df = pd.DataFrame(excel_rows)
+                        
+                        # 匯出至 BytesIO
+                        output = io.BytesIO()
+                        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                            df.to_excel(writer, index=False, sheet_name='待校對題庫')
+                            
+                            # 美化 Excel 寬度
+                            worksheet = writer.sheets['待校對題庫']
+                            worksheet.set_column('A:B', 8)
+                            worksheet.set_column('C:C', 15)
+                            worksheet.set_column('D:D', 40)
+                            worksheet.set_column('E:H', 20)
+                            worksheet.set_column('I:I', 10)
+                            worksheet.set_column('J:J', 40)
+
+                        st.success(f"🎉 成功初步解析了 **{len(questions)}** 題！請下載 Excel 檔發派給各科老師校對。")
+                        st.download_button(
+                            label="📊 下載待校對 Excel 檔",
+                            data=output.getvalue(),
+                            file_name=uploaded_word.name.replace(".docx", "_待校對.xlsx"),
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            type="primary",
+                            use_container_width=True
+                        )
                     else:
-                        if len(text) > 5:
-                            skipped_lines.append(text)
+                        st.error("😭 找不到任何題目。")
+                except Exception as e:
+                    st.error(f"系統發生錯誤：{e}")
 
-                # 收尾最後一題
-                if current_q:
-                    _extract_options(current_q)
-                    _extract_tags_from_all(current_q)
-                    auto_categorize(current_q, topic_mapping)
-                    questions.append(current_q)
+# ==========================================
+# 階段二：Excel 轉 JSON
+# ==========================================
+with tab2:
+    st.subheader("📥 上傳老師校對完畢的 Excel 檔")
+    st.info("當各科老師在 Excel 裡把「主題」和「錯字」都改好後，將檔案上傳至此，系統會直接將其封裝成前台可用的 JSON 系統題庫！")
+    
+    uploaded_excel = st.file_uploader("選擇已校對的 Excel 檔案 (.xlsx)", type=["xlsx"], key="excel_uploader")
 
-                if questions:
-                    st.success(f"🎉 轉換大功告成！系統共成功辨識並分類了 **{len(questions)}** 題！")
+    if uploaded_excel is not None:
+        if st.button("💾 封裝為最終 JSON 題庫", type="primary", use_container_width=True):
+            with st.spinner("正在讀取 Excel 並封裝為系統題庫..."):
+                try:
+                    df = pd.read_excel(uploaded_excel)
+                    df = df.fillna("") # 將 NaN 轉換為空字串
                     
-                    # 統計分類結果，讓老師一眼看出分類狀況
-                    st.markdown("#### 📊 本次分類統計結果：")
-                    topic_counts = {}
-                    for q in questions:
-                        t = q["tags"].get("主題", "未分類")
-                        topic_counts[t] = topic_counts.get(t, 0) + 1
-                    
-                    st.write(" | ".join([f"**{k}**: {v}題" for k, v in topic_counts.items()]))
-                    
-                    json_str = json.dumps(questions, ensure_ascii=False, separators=(',', ':'))
-                    
-                    st.download_button(
-                        label="💾 點我下載分類完畢的 JSON 題庫檔",
-                        data=json_str,
-                        file_name=uploaded_file.name.replace(".docx", "_V7_智慧分類版.json"),
-                        mime="application/json",
-                        type="primary",
-                        use_container_width=True
-                    )
-                    
-                    if skipped_lines:
-                        st.warning("⚠️ 以下文字無法被辨識為題目，若有漏題請檢查 Word 排版：")
-                        with st.expander("👀 點我查看忽略文字"):
-                            for line in skipped_lines:
-                                st.code(line)
-                else:
-                    st.error("😭 轉換失敗，找不到任何符合格式的題目。")
-
-            except Exception as e:
-                st.error(f"系統發生錯誤：{e}")
+                    final_questions = []
+                    for idx, row in df.iterrows():
+                        # 避開完全空白的行
+                        if str(row.get("題目", "")).strip() == "": continue
+                            
+                        # 重組選項
+                        opts = {}
+                        for k in ['A', 'B', 'C', 'D']:
+                            val = str(row.get(f"選項{k}", "")).strip()
+                            if val: opts[k] = val
+                            
+                        q_num = str(row.get("題號", "0")).strip()
+                        q_num = int(float(q_num)) if q_num.replace('.', '', 1).isdigit() else 0
+                        
+                        q = {
+                            "question_number": q_num,
+                            "answer": str(row.get("正確答案", "")).strip(),
+                            "explanation": str(row.get("解析", "")).strip(),
+                            "tags": {
+                                "年份": str(row.get("年份", "")).strip(),
+                                "主題": str(row.get("主題 (請在此修正)", "")).strip()
+                            },
+                            "question_text": str(row.get("題目", "")).strip(),
+                            "options": opts
+                        }
+                        final_questions.append(q)
+                        
+                    if final_questions:
+                        st.success(f"🎉 封裝成功！共匯入 **{len(final_questions)}** 題完美確認版考題！")
+                        
+                        json_str = json.dumps(final_questions, ensure_ascii=False, separators=(',', ':'))
+                        
+                        st.download_button(
+                            label="📥 下載最終上線版 JSON 題庫",
+                            data=json_str,
+                            file_name=uploaded_excel.name.replace(".xlsx", "_最終上線版.json"),
+                            mime="application/json",
+                            type="primary",
+                            use_container_width=True
+                        )
+                        st.markdown("⚠️ **下一步：** 帶著下載好的 JSON 檔案，前往您的【國考平台前台 -> 管理員登入 -> 科目與題庫管理】進行上傳發布！")
+                    else:
+                        st.error("😭 Excel 檔案內似乎沒有有效的題目資料。")
+                        
+                except Exception as e:
+                    st.error(f"讀取 Excel 失敗，請確認檔案格式是否正確：{e}")
