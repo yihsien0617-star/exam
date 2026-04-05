@@ -74,13 +74,23 @@ def _extract_tags_from_all(q_dict):
             q_dict["tags"]["主題"] = q_dict["tags"][k]
 
 def auto_categorize(q_dict, mapping):
-    if q_dict["tags"].get("主題", "未分類") != "未分類": return
-    search_text = (q_dict.get("question_text", "") + " " + q_dict.get("explanation", "")).lower()
+    """精確分類邏輯：優先比對題目，降低解析干擾"""
+    if q_dict["tags"].get("主題", "未分類") != "未分類": 
+        return 
+    
+    # 優先搜尋題目本文
+    q_text = q_dict.get("question_text", "").lower()
     for topic, keywords in mapping.items():
-        for kw in keywords:
-            if kw.lower() in search_text:
-                q_dict["tags"]["主題"] = topic
-                return 
+        if any(kw.lower() in q_text for kw in keywords):
+            q_dict["tags"]["主題"] = topic
+            return 
+
+    # 若題目沒抓到，僅抓取解析的前 60 個字 (避免後段干擾詞)
+    exp_text = q_dict.get("explanation", "")[:60].lower()
+    for topic, keywords in mapping.items():
+        if any(kw.lower() in exp_text for kw in keywords):
+            q_dict["tags"]["主題"] = topic
+            return
 
 def finalize_question(q_dict, topic_mapping):
     """🌟 終極大水桶分割器：智慧對齊圖片與解析"""
