@@ -74,21 +74,29 @@ def _extract_tags_from_all(q_dict):
             q_dict["tags"]["主題"] = q_dict["tags"][k]
 
 def auto_categorize(q_dict, mapping):
-    """精確分類邏輯：優先比對題目，降低解析干擾"""
+    """
+    優化後的分類邏輯：
+    1. 絕對優先比對『題目本文』。
+    2. 只有在題目完全抓不到關鍵字時，才比對『解析的前 50 個字』。
+    3. 排除解析後段的干擾。
+    """
     if q_dict["tags"].get("主題", "未分類") != "未分類": 
         return 
+
+    # 取得純淨的題目與解析（移除圖片佔位符以利比對）
+    q_text = re.sub(r'\[IMG: [^\]]+\]', '', q_dict.get("question_text", "")).lower()
+    exp_text = re.sub(r'\[IMG: [^\]]+\]', '', q_dict.get("explanation", "")).lower()
     
-    # 優先搜尋題目本文
-    q_text = q_dict.get("question_text", "").lower()
+    # 步驟 1: 僅針對題目比對
     for topic, keywords in mapping.items():
         if any(kw.lower() in q_text for kw in keywords):
             q_dict["tags"]["主題"] = topic
             return 
 
-    # 若題目沒抓到，僅抓取解析的前 60 個字 (避免後段干擾詞)
-    exp_text = q_dict.get("explanation", "")[:60].lower()
+    # 步驟 2: 若題目沒抓到，才看解析的最前面（通常解析開頭會重複臨床診斷名稱）
+    short_exp = exp_text[:50] 
     for topic, keywords in mapping.items():
-        if any(kw.lower() in exp_text for kw in keywords):
+        if any(kw.lower() in short_exp for kw in keywords):
             q_dict["tags"]["主題"] = topic
             return
 
